@@ -1,0 +1,67 @@
+/*
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
+ */
+
+#ifndef PLAYERBOTS_AQ40ACTIONCONTEXT_H
+#define PLAYERBOTS_AQ40ACTIONCONTEXT_H
+
+#include "Aq40Actions.h"
+#include "NamedObjectContext.h"
+
+class RaidAq40ActionContext : public NamedObjectContext<Action>
+{
+public:
+    RaidAq40ActionContext()
+    {
+        // The Prophet Skeram
+        creators["skeram polymorph mind controlled"] = &RaidAq40ActionContext::skeram_polymorph_mind_controlled;
+        creators["skeram attack image"] = &RaidAq40ActionContext::skeram_attack_image;
+        creators["skeram pickup untanked"] = &RaidAq40ActionContext::skeram_pickup_untanked;
+
+        // Battleguard Sartura
+        creators["sartura flee whirlwind"] = &RaidAq40ActionContext::sartura_flee_whirlwind;
+        creators["sartura attack royal guard"] = &RaidAq40ActionContext::sartura_attack_royal_guard;
+        creators["sartura kidney shot"] = &RaidAq40ActionContext::sartura_kidney_shot;
+
+        // Bug Trio
+        creators["bug trio fear prep"] = &RaidAq40ActionContext::bug_trio_fear_prep;
+        creators["bug trio flee poison cloud"] = &RaidAq40ActionContext::bug_trio_flee_poison_cloud;
+        creators["bug trio attack kill order"] = &RaidAq40ActionContext::bug_trio_attack_kill_order;
+
+        // Fankriss the Unyielding
+        creators["fankriss tank swap"] = &RaidAq40ActionContext::fankriss_tank_swap;
+        creators["fankriss pickup spawn"] = &RaidAq40ActionContext::fankriss_pickup_spawn;
+        creators["fankriss attack spawn"] = &RaidAq40ActionContext::fankriss_attack_spawn;
+
+        // Viscidus
+        creators["viscidus cast frostbolt"] = &RaidAq40ActionContext::viscidus_cast_frostbolt;
+        creators["viscidus attack frozen"] = &RaidAq40ActionContext::viscidus_attack_frozen;
+        creators["viscidus attack glob"] = &RaidAq40ActionContext::viscidus_attack_glob;
+        creators["viscidus flee toxin"] = &RaidAq40ActionContext::viscidus_flee_toxin;
+    }
+
+private:
+    static Action* skeram_polymorph_mind_controlled(PlayerbotAI* ai)
+    {
+        return new SkeramPolymorphMindControlledAction(ai);
+    }
+    static Action* skeram_attack_image(PlayerbotAI* ai) { return new SkeramAttackImageAction(ai); }
+    static Action* skeram_pickup_untanked(PlayerbotAI* ai) { return new SkeramPickupUntankedAction(ai); }
+    static Action* sartura_flee_whirlwind(PlayerbotAI* ai) { return new SarturaFleeWhirlwindAction(ai); }
+    static Action* sartura_attack_royal_guard(PlayerbotAI* ai) { return new SarturaAttackRoyalGuardAction(ai); }
+    static Action* sartura_kidney_shot(PlayerbotAI* ai) { return new SarturaKidneyShotAction(ai); }
+    static Action* bug_trio_fear_prep(PlayerbotAI* ai) { return new BugTrioFearPrepAction(ai); }
+    static Action* bug_trio_flee_poison_cloud(PlayerbotAI* ai) { return new BugTrioFleePoisonCloudAction(ai); }
+    static Action* bug_trio_attack_kill_order(PlayerbotAI* ai) { return new BugTrioAttackKillOrderAction(ai); }
+    static Action* fankriss_tank_swap(PlayerbotAI* ai) { return new FankrissTankSwapAction(ai); }
+    static Action* fankriss_pickup_spawn(PlayerbotAI* ai) { return new FankrissPickupSpawnAction(ai); }
+    static Action* fankriss_attack_spawn(PlayerbotAI* ai) { return new FankrissAttackSpawnAction(ai); }
+    static Action* viscidus_cast_frostbolt(PlayerbotAI* ai) { return new ViscidusCastFrostboltAction(ai); }
+    static Action* viscidus_attack_frozen(PlayerbotAI* ai) { return new ViscidusAttackFrozenAction(ai); }
+    static Action* viscidus_attack_glob(PlayerbotAI* ai) { return new ViscidusAttackGlobAction(ai); }
+    static Action* viscidus_flee_toxin(PlayerbotAI* ai) { return new ViscidusFleeToxinAction(ai); }
+};
+
+#endif

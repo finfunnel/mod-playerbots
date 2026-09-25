@@ -1,0 +1,159 @@
+/*
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
+ */
+
+#ifndef PLAYERBOTS_AQ40TRIGGERS_H
+#define PLAYERBOTS_AQ40TRIGGERS_H
+
+#include "EncounterHelpers.h"
+#include "Trigger.h"
+
+/*
+ * Temple of Ahn'Qiraj (AQ40, map 531).
+ * The Prophet Skeram (NPC 15263). IDs verified against boss_skeram.cpp + temple_of_ahnqiraj.h:
+ * - True Fulfillment 785: mind control on the player farthest from the boss (MinDistance
+ *   target); the controlled player must be polymorphed by a mage (guide).
+ * - Arcane Explosion 26192: point-blank AoE spammed by boss AND images - melee unfriendly,
+ *   nothing to dodge for ranged, no bot-side handling needed beyond default spread.
+ * - Earth Shock 26194: spammed on random targets while NO tank holds the boss - all tanks
+ *   must rush to pick up boss/images after every split/teleport.
+ * - Summon Images 747 at 75/50/25%: two images share the boss entry 15263 with 10-50% of
+ *   his health (JustSummoned). Guide: kill images first (they deal heavy AoE), tanks pick
+ *   each copy up.
+ * - Blink/teleports (3 platforms): threat resets on teleport - DPS must hold until tanks
+ *   re-establish threat (handled by making image/boss pickup tank-only and letting the
+ *   default engine's threat checks gate DPS).
+ */
+enum TempleOfAhnQirajIDs
+{
+    NPC_THE_PROPHET_SKERAM               = 15263, // images share this entry (summoned by 747)
+
+    SPELL_TRUE_FULFILLMENT               = 785,   // mind control; counter = polymorph
+    SPELL_ARCANE_EXPLOSION_AQ40          = 26192,
+    SPELL_EARTH_SHOCK_AQ40               = 26194,
+
+    // ---- Battleguard Sartura (boss_sartura.cpp + temple_of_ahnqiraj.h) ----
+    NPC_SARTURA                          = 15516,
+    NPC_SARTURA_ROYAL_GUARD              = 15984,
+    SPELL_WHIRLWIND_SARTURA              = 26083, // boss whirlwind, 15s, random hops + threat wipes
+    SPELL_GUARD_WHIRLWIND                = 26038, // royal guard whirlwind, 8s
+    SARTURA_WHIRLWIND_ESCAPE_RANGE       = 12,   // melee run out during whirlwind
+    SARTURA_SEARCH_RANGE                 = 80,   // boss room radius
+
+    // ---- Bug Trio: Lord Kri / Princess Yauj / Vem (boss_bug_trio.cpp) ----
+    NPC_KRI                              = 15511,
+    NPC_YAUJ                             = 15543,
+    NPC_VEM                              = 15544,
+    SPELL_YAUJ_FEAR                      = 26580, // AoE fear every ~20s + threat reset
+    SPELL_KRI_POISON_CLOUD               = 26590, // spawned on Kri's corpse, ~2000 nature dps
+    SPELL_KRI_TOXIC_VOLLEY               = 25812, // nature damage + DoT on the raid
+    BUG_TRIO_SEARCH_RANGE                = 80,
+    POISON_CLOUD_ESCAPE_RANGE            = 12    // run this far from a poison cloud
+};
+
+// IDs kept for Skeram-only lookups (shared boss-room radius).
+enum SkeramIDs
+{
+    AQ40_MAP_ID                          = 531,  // Temple of Ahn'Qiraj
+    SKERAM_SEARCH_RANGE                  = 80    // boss room radius
+};
+
+// Trigger base: only active while an encounter is in progress in the Temple of Ahn'Qiraj
+class AhnQirajEncounterTrigger : public Trigger
+{
+public:
+    AhnQirajEncounterTrigger(PlayerbotAI* ai, std::string const name, int32 checkInterval = 1)
+        : Trigger(ai, name, checkInterval) {}
+
+    bool IsActive() final
+    {
+        return EncounterHelpers::IsEncounterInProgress(bot, AQ40_MAP_ID) && IsActiveInEncounter();
+    }
+
+protected:
+    virtual bool IsActiveInEncounter() = 0;
+};
+
+// ---- The Prophet Skeram ----
+
+// A group member is mind controlled by True Fulfillment (785): mages polymorph them.
+// Images and the boss all share entry 15263, so HasAura on a player means MC regardless.
+class SkeramMemberMindControlledTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    SkeramMemberMindControlledTrigger(PlayerbotAI* ai)
+        : AhnQirajEncounterTrigger(ai, "skeram member mind controlled") {}
+    bool IsActiveInEncounter() override;
+};
+
+// A Skeram image (summoned copy, entry 15263) exists and is attackable: everyone switches
+// to it - images deal heavy AoE and must die first (guide).
+class SkeramImageUpTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    SkeramImageUpTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "skeram image up", 2) {}
+    bool IsActiveInEncounter() override;
+};
+
+// The boss (or an image) has no living tank on it (post-split / post-teleport): a free tank
+// must pick it up at once or it spams Earth Shock (26194) on the raid.
+class SkeramUntankedTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    SkeramUntankedTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "skeram untanked") {}
+    bool IsActiveInEncounter() override;
+};
+
+// ---- Battleguard Sartura ----
+
+// Sartura or a Royal Guard is whirlwinding (26083 / 26038): melee must run out or get
+// shredded; threat is wiped constantly so anyone may be the target (guide: 吃控的BOSS,
+// 旋风斩立刻清除仇恨，近战停手躲旋风).
+class SarturaWhirlwindActiveTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    SarturaWhirlwindActiveTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "sartura whirlwind active", 2) {}
+    bool IsActiveInEncounter() override;
+};
+
+// A living Royal Guard (15984) is present: kill the three guards first, then the boss
+// (guide: 优先击杀三个卫兵，然后杀boss).
+class SarturaRoyalGuardUpTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    SarturaRoyalGuardUpTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "sartura royal guard up", 2) {}
+    bool IsActiveInEncounter() override;
+};
+
+// ---- Bug Trio (Lord Kri / Princess Yauj / Vem) ----
+
+// Princess Yauj is engaged and about to AoE fear: priests Fear Ward the current tank,
+// shamans drop a Tremor Totem (guide: 萨满插好图腾，牧师上好防恐).
+class BugTrioFearPrepTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    BugTrioFearPrepTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "bug trio fear prep", 2) {}
+    bool IsActiveInEncounter() override;
+};
+
+// Kri died and left a poison cloud (26590, ~2000 nature dps): everyone nearby runs out
+// (guide: 克里死后尸体周围产生毒云，务必远离).
+class BugTrioPoisonCloudTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    BugTrioPoisonCloudTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "bug trio poison cloud", 2) {}
+    bool IsActiveInEncounter() override;
+};
+
+// Kill-order targets: Vem while Yauj lives, then Kri (guide: 先杀亚尔基公主，再集火维姆，
+// 最后杀克里). Everyone follows the order so the raid burns one bug at a time.
+class BugTrioKillOrderTargetTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    BugTrioKillOrderTargetTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "bug trio kill order target", 2) {}
+    bool IsActiveInEncounter() override;
+};
+
+#endif

@@ -1,0 +1,39 @@
+/*
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
+ */
+
+#ifndef PLAYERBOTS_AQ40TRIGGERCONTEXT_H
+#define PLAYERBOTS_AQ40TRIGGERCONTEXT_H
+
+#include "Aq40Triggers.h"
+#include "NamedObjectContext.h"
+
+class RaidAq40TriggerContext : public NamedObjectContext<Trigger>
+{
+public:
+    RaidAq40TriggerContext()
+    {
+        // The Prophet Skeram
+        creators["skeram member mind controlled"] = &RaidAq40TriggerContext::skeram_member_mind_controlled;
+        creators["skeram image up"] = &RaidAq40TriggerContext::skeram_image_up;
+        creators["skeram untanked"] = &RaidAq40TriggerContext::skeram_untanked;
+
+        // Battleguard Sartura
+        creators["sartura whirlwind active"] = &RaidAq40TriggerContext::sartura_whirlwind_active;
+        creators["sartura royal guard up"] = &RaidAq40TriggerContext::sartura_royal_guard_up;
+    }
+
+private:
+    static Trigger* skeram_member_mind_controlled(PlayerbotAI* ai)
+    {
+        return new SkeramMemberMindControlledTrigger(ai);
+    }
+    static Trigger* skeram_image_up(PlayerbotAI* ai) { return new SkeramImageUpTrigger(ai); }
+    static Trigger* skeram_untanked(PlayerbotAI* ai) { return new SkeramUntankedTrigger(ai); }
+    static Trigger* sartura_whirlwind_active(PlayerbotAI* ai) { return new SarturaWhirlwindActiveTrigger(ai); }
+    static Trigger* sartura_royal_guard_up(PlayerbotAI* ai) { return new SarturaRoyalGuardUpTrigger(ai); }
+};
+
+#endif

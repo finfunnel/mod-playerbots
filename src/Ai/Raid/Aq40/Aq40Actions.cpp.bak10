@@ -1,0 +1,872 @@
+/*
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
+ */
+
+#include "Aq40Actions.h"
+#include "Cell.h"
+#include "Creature.h"
+#include "DynamicObject.h"
+#include "GridNotifiers.h"
+#include "Group.h"
+#include "Playerbots.h"
+
+namespace
+{
+// Same lookup as Aq40Triggers.cpp (pattern from ICCActions_SG.cpp).
+void FindSkeramCopies(Player* bot, float range, std::list<Creature*>& copies)
+{
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, range);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, range);
+
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (creature && creature->IsAlive() && creature->GetEntry() == NPC_THE_PROPHET_SKERAM)
+            copies.push_back(creature);
+    }
+}
+// Any living Sartura-family unit (boss 15516 or Royal Guard 15984) within range.
+bool IsSarturaFamily(Unit* unit)
+{
+    return unit->GetEntry() == NPC_SARTURA || unit->GetEntry() == NPC_SARTURA_ROYAL_GUARD;
+}
+
+// Kri's corpse poison cloud (26590) within escape distance (same lookup as the trigger).
+bool FindPoisonCloud(Player* bot, float scanRange, DynamicObject*& outCloud)
+{
+    std::vector<WorldObject*> objs;
+    Acore::AllWorldObjectsInRange check(bot, scanRange);
+    Acore::WorldObjectListSearcher<Acore::AllWorldObjectsInRange> searcher(
+        bot, objs, check, GRID_MAP_TYPE_MASK_DYNAMICOBJECT);
+    Cell::VisitObjects(bot, searcher, scanRange);
+
+    for (WorldObject* obj : objs)
+    {
+        DynamicObject* dyn = obj->ToDynObject();
+        if (!dyn || dyn->GetSpellId() != SPELL_KRI_POISON_CLOUD)
+            continue;
+
+        float radius = dyn->GetRadius();
+        if (radius <= 0.0f)
+            radius = POISON_CLOUD_ESCAPE_RANGE;
+
+        if (bot->GetExactDist2d(dyn) <= radius + 2.0f)
+        {
+            outCloud = dyn;
+            return true;
+        }
+    }
+
+    return false;
+}
+} // namespace
+
+bool SkeramPolymorphMindControlledAction::isUseful()
+{
+    // Only mages can polymorph; polymorph is also the guide's stated counter
+    return bot->getClass() == CLASS_MAGE;
+}
+
+bool SkeramPolymorphMindControlledAction::Execute(Event /*event*/)
+{
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+
+    for (GroupReference* gref = group->GetFirstMember(); gref; gref = gref->next())
+    {
+        Player* member = gref->GetSource();
+        if (!member || member == bot || !member->IsAlive())
+            continue;
+
+        if (member->HasAura(SPELL_TRUE_FULFILLMENT) && !member->IsPolymorphed())
+            return botAI->CastSpell("polymorph", member);
+    }
+
+    return false;
+}
+
+bool SkeramAttackImageAction::Execute(Event /*event*/)
+{
+    // Images are summoned 15263 copies with 10-50% of boss health; prefer the weakest
+    // (lowest absolute health) so the raid burns copies down one at a time.
+    std::list<Creature*> copies;
+    FindSkeramCopies(bot, SKERAM_SEARCH_RANGE, copies);
+
+    Creature* best = nullptr;
+    for (Creature* creature : copies)
+    {
+        if (!creature->IsSummon() || !creature->isTargetableForAttack())
+            continue;
+
+        if (!best || creature->GetHealth() < best->GetHealth())
+            best = creature;
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false; // already burning it
+
+    return Attack(best);
+}
+
+bool SkeramPickupUntankedAction::isUseful()
+{
+    return botAI->IsTank(bot);
+}
+
+bool SkeramPickupUntankedAction::Execute(Event /*event*/)
+{
+    std::list<Creature*> copies;
+    FindSkeramCopies(bot, SKERAM_SEARCH_RANGE, copies);
+
+    // Pick the un-tanked copy closest to this tank (real boss first: IsSummon() == false)
+    Creature* pick = nullptr;
+    float minDist = std::numeric_limits<float>::max();
+    for (Creature* creature : copies)
+    {
+        if (!creature->isTargetableForAttack())
+            continue;
+
+        Unit* victim = creature->GetVictim();
+        if (victim && victim->IsAlive())
+            continue; // someone has it
+
+        float dist = bot->GetExactDist2d(creature);
+        if (dist < minDist)
+        {
+            minDist = dist;
+            pick = creature;
+        }
+    }
+
+    if (!pick)
+        return false;
+
+    if (pick->GetVictim() == bot)
+        return Attack(pick); // already mine: keep threat up
+
+    // Class taunt (pattern from BrutallusTankSwapAction / RsCastClassTaunt)
+    switch (bot->getClass())
+    {
+        case CLASS_PALADIN:
+            if (botAI->CastSpell("hand of reckoning", pick))
+                return true;
+            break;
+        case CLASS_DEATH_KNIGHT:
+            if (botAI->CastSpell("dark command", pick))
+                return true;
+            break;
+        case CLASS_DRUID:
+            if (botAI->CastSpell("growl", pick))
+                return true;
+            break;
+        case CLASS_WARRIOR:
+            if (botAI->CastSpell("taunt", pick))
+                return true;
+            break;
+        default:
+            break;
+    }
+
+    return Attack(pick);
+}
+
+// ---- Battleguard Sartura ----
+
+bool SarturaFleeWhirlwindAction::isUseful()
+{
+    // Whirlwind hops to random raid members with full threat wipes - nobody is safe
+    // standing in it, tanks included (guide: 旋风斩期间停手躲避).
+    return true;
+}
+
+bool SarturaFleeWhirlwindAction::Execute(Event /*event*/)
+{
+    // Run from the closest whirlwinding Sartura-family unit (pattern from
+    // MuruDarknessEscapeAction).
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, SARTURA_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, SARTURA_SEARCH_RANGE);
+
+    Unit* closest = nullptr;
+    float minDist = std::numeric_limits<float>::max();
+    for (Unit* unit : units)
+    {
+        if (!IsSarturaFamily(unit) || !unit->IsAlive())
+            continue;
+
+        if (!unit->HasAura(SPELL_WHIRLWIND_SARTURA) && !unit->HasAura(SPELL_GUARD_WHIRLWIND))
+            continue; // not spinning
+
+        float dist = bot->GetExactDist2d(unit);
+        if (dist < minDist)
+        {
+            minDist = dist;
+            closest = unit;
+        }
+    }
+
+    if (!closest)
+        return false;
+
+    // Already outside the blade storm: hold position and wait it out
+    if (minDist > SARTURA_WHIRLWIND_ESCAPE_RANGE)
+        return false;
+
+    float angle = closest->GetAngle(bot);
+    return Move(angle, SARTURA_WHIRLWIND_ESCAPE_RANGE + 2.0f);
+}
+
+bool SarturaAttackRoyalGuardAction::Execute(Event /*event*/)
+{
+    // Burn the weakest living Royal Guard (guide: guards first, then the boss)
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, SARTURA_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, SARTURA_SEARCH_RANGE);
+
+    Creature* best = nullptr;
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (!creature || !creature->IsAlive() || creature->GetEntry() != NPC_SARTURA_ROYAL_GUARD
+            || !creature->isTargetableForAttack())
+            continue;
+
+        if (!best || creature->GetHealth() < best->GetHealth())
+            best = creature;
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false; // already on it
+
+    return Attack(best);
+}
+
+bool SarturaKidneyShotAction::isUseful()
+{
+    // Guide: Sartura is stunnable - rogues chain Kidney Shot to cut the damage output.
+    return bot->getClass() == CLASS_ROGUE;
+}
+
+bool SarturaKidneyShotAction::Execute(Event /*event*/)
+{
+    Creature* sartura = bot->FindNearestCreature(NPC_SARTURA, SARTURA_SEARCH_RANGE, true);
+    if (!sartura)
+        return false;
+
+    // No point stunning a spinning boss (stun-immune while whirlwinding) - and melee
+    // should be running out anyway.
+    if (sartura->HasAura(SPELL_WHIRLWIND_SARTURA))
+        return false;
+
+    if (sartura->HasUnitState(UNIT_STATE_STUNNED))
+        return false; // already stunned by another rogue
+
+    return botAI->CastSpell("kidney shot", sartura);
+}
+
+// ---- Bug Trio ----
+
+bool BugTrioFearPrepAction::Execute(Event /*event*/)
+{
+    Creature* yauj = bot->FindNearestCreature(NPC_YAUJ, BUG_TRIO_SEARCH_RANGE, true);
+    if (!yauj)
+        return false;
+
+    if (bot->getClass() == CLASS_PRIEST)
+    {
+        // Fear Ward the bug's current victim before the periodic AoE fear lands
+        // (pattern from BwlNefarianFearWardAction).
+        Unit* victim = yauj->GetVictim();
+        if (!victim || !victim->IsAlive())
+            return false;
+
+        if (botAI->HasAura("fear ward", victim))
+            return false;
+
+        return botAI->CastSpell("fear ward", victim);
+    }
+
+    if (bot->getClass() == CLASS_SHAMAN)
+    {
+        // Keep a Tremor Totem down (pattern from MgT/Seth/Ramp tremor triggers).
+        if (AI_VALUE2(bool, "has totem", "tremor totem"))
+            return false;
+
+        return botAI->CastSpell("tremor totem", bot);
+    }
+
+    return false;
+}
+
+bool BugTrioFleePoisonCloudAction::Execute(Event /*event*/)
+{
+    DynamicObject* cloud = nullptr;
+    if (!FindPoisonCloud(bot, BUG_TRIO_SEARCH_RANGE, cloud) || !cloud)
+        return false;
+
+    float angle = cloud->GetAngle(bot);
+    return Move(angle, POISON_CLOUD_ESCAPE_RANGE + 2.0f);
+}
+
+bool BugTrioAttackKillOrderAction::isUseful()
+{
+    return !botAI->IsTank(bot); // tanks keep their own assignments
+}
+
+bool BugTrioAttackKillOrderAction::Execute(Event /*event*/)
+{
+    // Guide kill order: Yauj (AoE fear + heals) -> Vem -> Kri (poison cloud on death).
+    Creature* targets[] = { bot->FindNearestCreature(NPC_YAUJ, BUG_TRIO_SEARCH_RANGE, true),
+                            bot->FindNearestCreature(NPC_VEM, BUG_TRIO_SEARCH_RANGE, true),
+                            bot->FindNearestCreature(NPC_KRI, BUG_TRIO_SEARCH_RANGE, true) };
+
+    for (Creature* creature : targets)
+    {
+        if (!creature || !creature->isTargetableForAttack())
+            continue;
+
+        if (AI_VALUE(Unit*, "current target") == creature)
+            return false; // already on the right bug
+
+        return Attack(creature);
+    }
+
+    return false;
+}
+
+// ---- Fankriss ----
+
+bool FankrissTankSwapAction::isUseful()
+{
+    return botAI->IsTank(bot);
+}
+
+bool FankrissTankSwapAction::Execute(Event /*event*/)
+{
+    Creature* fankriss = bot->FindNearestCreature(NPC_FANKRISS, FANKRISS_SEARCH_RANGE, true);
+    if (!fankriss || !fankriss->IsAlive())
+        return false;
+
+    Unit* victim = fankriss->GetVictim();
+    if (!victim || !victim->IsAlive() || victim == bot)
+        return false; // nobody to relieve / already me
+
+    Aura* wounds = victim->GetAura(SPELL_MORTAL_WOUND_FANKRISS);
+    if (!wounds || wounds->GetStackAmount() < FANKRISS_MORTAL_WOUND_SWAP_STACKS)
+        return false; // not stacked enough yet
+
+    // Class taunt (pattern from BrutallusTankSwapAction)
+    switch (bot->getClass())
+    {
+        case CLASS_PALADIN:
+            if (botAI->CastSpell("hand of reckoning", fankriss))
+                return true;
+            break;
+        case CLASS_DEATH_KNIGHT:
+            if (botAI->CastSpell("dark command", fankriss))
+                return true;
+            break;
+        case CLASS_DRUID:
+            if (botAI->CastSpell("growl", fankriss))
+                return true;
+            break;
+        case CLASS_WARRIOR:
+            if (botAI->CastSpell("taunt", fankriss))
+                return true;
+            break;
+        default:
+            break;
+    }
+
+    return Attack(fankriss);
+}
+
+bool FankrissPickupSpawnAction::isUseful()
+{
+    return botAI->IsTank(bot);
+}
+
+bool FankrissPickupSpawnAction::Execute(Event /*event*/)
+{
+    // Grab the closest un-tanked sandworm (guide: 坦克拉好，优先击杀)
+    std::list<Creature*> worms;
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, FANKRISS_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, FANKRISS_SEARCH_RANGE);
+
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (creature && creature->IsAlive() && creature->GetEntry() == NPC_SPAWN_OF_FANKRISS)
+            worms.push_back(creature);
+    }
+
+    Creature* pick = nullptr;
+    float minDist = std::numeric_limits<float>::max();
+    for (Creature* worm : worms)
+    {
+        if (!worm->isTargetableForAttack())
+            continue;
+
+        Unit* victim = worm->GetVictim();
+        if (victim && victim->IsAlive())
+            continue; // someone has it
+
+        float dist = bot->GetExactDist2d(worm);
+        if (dist < minDist)
+        {
+            minDist = dist;
+            pick = worm;
+        }
+    }
+
+    if (!pick)
+        return false;
+
+    switch (bot->getClass())
+    {
+        case CLASS_PALADIN:
+            if (botAI->CastSpell("hand of reckoning", pick))
+                return true;
+            break;
+        case CLASS_DEATH_KNIGHT:
+            if (botAI->CastSpell("dark command", pick))
+                return true;
+            break;
+        case CLASS_DRUID:
+            if (botAI->CastSpell("growl", pick))
+                return true;
+            break;
+        case CLASS_WARRIOR:
+            if (botAI->CastSpell("taunt", pick))
+                return true;
+            break;
+        default:
+            break;
+    }
+
+    return Attack(pick);
+}
+
+bool FankrissAttackSpawnAction::Execute(Event /*event*/)
+{
+    // Burn the weakest living sandworm first (guide: 优先击杀)
+    Creature* best = nullptr;
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, FANKRISS_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, FANKRISS_SEARCH_RANGE);
+
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (!creature || !creature->IsAlive() || creature->GetEntry() != NPC_SPAWN_OF_FANKRISS
+            || !creature->isTargetableForAttack())
+            continue;
+
+        if (!best || creature->GetHealth() < best->GetHealth())
+            best = creature;
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false; // already on it
+
+    return Attack(best);
+}
+
+// ---- Viscidus ----
+
+bool ViscidusCastFrostboltAction::Execute(Event /*event*/)
+{
+    // Spam frost damage to grow the freeze counter (200 frost hits = frozen)
+    Creature* viscidus = bot->FindNearestCreature(NPC_VISCIDUS, VISCIDUS_SEARCH_RANGE, true);
+    if (!viscidus || !viscidus->isTargetableForAttack())
+        return false;
+
+    return botAI->CastSpell("frostbolt", viscidus);
+}
+
+bool ViscidusAttackFrozenAction::Execute(Event /*event*/)
+{
+    // Frozen boss: melee it down the shatter counter (150 melee hits = explode)
+    Creature* viscidus = bot->FindNearestCreature(NPC_VISCIDUS, VISCIDUS_SEARCH_RANGE, true);
+    if (!viscidus || !viscidus->isTargetableForAttack())
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == viscidus)
+        return false; // already swinging
+
+    return Attack(viscidus);
+}
+
+bool ViscidusAttackGlobAction::Execute(Event /*event*/)
+{
+    // Closest living glob first - the far ones may already be rejoining
+    Creature* best = nullptr;
+    float minDist = std::numeric_limits<float>::max();
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, VISCIDUS_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, VISCIDUS_SEARCH_RANGE);
+
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (!creature || !creature->IsAlive() || creature->GetEntry() != NPC_GLOB_OF_VISCIDUS
+            || !creature->isTargetableForAttack())
+            continue;
+
+        float dist = bot->GetExactDist2d(creature);
+        if (dist < minDist)
+        {
+            minDist = dist;
+            best = creature;
+        }
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false;
+
+    return Attack(best);
+}
+
+bool ViscidusFleeToxinAction::Execute(Event /*event*/)
+{
+    Creature* slime = bot->FindNearestCreature(NPC_TOXIC_SLIME, VISCIDUS_SEARCH_RANGE, true);
+    if (!slime)
+        return false;
+
+    if (bot->GetExactDist2d(slime) > TOXIN_ESCAPE_RANGE)
+        return false; // already safe
+
+    float angle = slime->GetAngle(bot);
+    return Move(angle, TOXIN_ESCAPE_RANGE + 2.0f);
+}
+
+// ---- Huhuran ----
+
+bool HuhuranSoakAction::isUseful()
+{
+    // Only melee should volunteer as soakers: ranged staying far away simply get
+    // skipped by the 15-nearest selection instead of eating avoidable bolts.
+    return !PlayerbotAI::IsRanged(bot);
+}
+
+bool HuhuranSoakAction::Execute(Event /*event*/)
+{
+    // Stack on the boss during berserk so Poison Bolt lands on the melee pack
+    // (guide: 毒镖AOE打最近的15个目标，沙包贴身吸收).
+    Creature* huhuran = bot->FindNearestCreature(NPC_HUHURAN, HUHURAN_SEARCH_RANGE, true);
+    if (!huhuran)
+        return false;
+
+    if (bot->GetExactDist2d(huhuran) <= 5.0f)
+        return false; // already stacked
+
+    return MoveNear(huhuran, 2.0f);
+}
+
+// ---- Twin Emperors ----
+
+bool TwinEmpVeklorPickupAction::Execute(Event /*event*/)
+{
+    // Grab the caster emperor with searing pain spam: highest-threat filler for a
+    // spell tank (pattern from LeotherasTheBlindDemonFormTankAttackBossAction).
+    Creature* veklor = bot->FindNearestCreature(NPC_VEKLOR, TWIN_EMPERORS_SEARCH_RANGE, true);
+    if (!veklor || !veklor->isTargetableForAttack())
+        return false;
+
+    if (veklor->GetVictim() == bot)
+        if (botAI->CastSpell("searing pain", veklor))
+            return true; // holding him: keep the threat lead
+
+    // Out of combat with him or lost after a teleport: pull and stand ground
+    if (botAI->CanCastSpell("searing pain", veklor))
+        return botAI->CastSpell("searing pain", veklor);
+
+    return Attack(veklor);
+}
+
+bool TwinEmpTankSwapAction::Execute(Event /*event*/)
+{
+    // Relieve the Unbalancing-Struck Veknilash tank (guide: 重压打击减100防御，换坦)
+    Creature* veknilash = bot->FindNearestCreature(NPC_VEKNILASH, TWIN_EMPERORS_SEARCH_RANGE, true);
+    if (!veknilash || !veknilash->IsAlive())
+        return false;
+
+    Unit* victim = veknilash->GetVictim();
+    if (!victim || !victim->IsAlive() || victim == bot)
+        return false; // nobody to relieve / already me
+
+    if (!victim->HasAura(SPELL_UNBALANCING_STRIKE))
+        return false;
+
+    // Class taunt (pattern from FankrissTankSwapAction)
+    switch (bot->getClass())
+    {
+        case CLASS_PALADIN:
+            if (botAI->CastSpell("hand of reckoning", veknilash))
+                return true;
+            break;
+        case CLASS_DEATH_KNIGHT:
+            if (botAI->CastSpell("dark command", veknilash))
+                return true;
+            break;
+        case CLASS_DRUID:
+            if (botAI->CastSpell("growl", veknilash))
+                return true;
+            break;
+        case CLASS_WARRIOR:
+            if (botAI->CastSpell("taunt", veknilash))
+                return true;
+            break;
+        default:
+            break;
+    }
+
+    return Attack(veknilash);
+}
+
+bool TwinEmpAttackCorrectTwinAction::Execute(Event /*event*/)
+{
+    // A melee bot on the magic-immune Veklor deals zero damage and feeds Arcane Burst
+    // (568) - switch to his physically-vulnerable brother instead (guide: 注意伤害类型).
+    if (PlayerbotAI::IsRanged(bot))
+        return false;
+
+    Creature* veknilash = bot->FindNearestCreature(NPC_VEKNILASH, TWIN_EMPERORS_SEARCH_RANGE, true);
+    if (!veknilash || !veknilash->isTargetableForAttack())
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == veknilash)
+        return false; // already on the right twin
+
+    return Attack(veknilash);
+}
+
+// ---- Ouro ----
+
+bool OuroFleeMoundAction::Execute(Event /*event*/)
+{
+    // Keep distance from the closest chasing dirt mound (pattern from
+    // SarturaFleeWhirlwindAction; mounds re-target a random player every 5-10s).
+    Creature* mound = bot->FindNearestCreature(NPC_DIRT_MOUND, OURO_SEARCH_RANGE, true);
+    if (!mound)
+        return false;
+
+    if (bot->GetExactDist2d(mound) > OURO_MOUND_ESCAPE_RANGE)
+        return false; // not on top of us
+
+    float angle = mound->GetAngle(bot);
+    return Move(angle, OURO_MOUND_ESCAPE_RANGE + 2.0f);
+}
+
+bool OuroAttackScarabAction::Execute(Event /*event*/)
+{
+    // Burn the weakest living scarab first - they die fast and respawn during berserk
+    Creature* best = nullptr;
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, OURO_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, OURO_SEARCH_RANGE);
+
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (!creature || !creature->IsAlive() || creature->GetEntry() != NPC_OURO_SCARAB
+            || !creature->isTargetableForAttack())
+            continue;
+
+        if (!best || creature->GetHealth() < best->GetHealth())
+            best = creature;
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false; // already on it
+
+    return Attack(best);
+}
+
+// ---- C'Thun ----
+
+bool CthunFleeDarkGlareAction::Execute(Event /*event*/)
+{
+    // The red beam sweeps 35 ticks clockwise or counter-clockwise; keep rotating away
+    // from the eye's facing rather than trying to out-range it (pattern: constant
+    // strafing, guide: 全体跑位).
+    Creature* eye = bot->FindNearestCreature(NPC_EYE_OF_CTHUN, CTHUN_SEARCH_RANGE, true);
+    if (!eye)
+        return false;
+
+    // Not in the beam's plane yet / already behind it: keep circling anyway - standing
+    // still lets the sweep catch up.
+    float angle = eye->GetAngle(bot);
+    // Sidestep perpendicular to the eye->bot line so we rotate around the eye
+    float strafe = angle + (M_PI / 2.0f);
+    return Move(strafe, CTHUN_GLARE_STRAFE_RANGE);
+}
+
+bool CthunAttackTentacleAction::isUseful()
+{
+    // Melee stay on the Eye/body; ranged are the tentacle cleanup crew
+    // (guide: 近战集火克苏恩，远程优先击杀触须).
+    return PlayerbotAI::IsRanged(bot);
+}
+
+bool CthunAttackTentacleAction::Execute(Event /*event*/)
+{
+    // Nearest living small tentacle, claw (15725) before eye (15726) - claws melee the
+    // random player they spawn under, eyes chain-cast shadow bolts.
+    Creature* targets[] = { bot->FindNearestCreature(NPC_CLAW_TENTACLE, CTHUN_SEARCH_RANGE, true),
+                            bot->FindNearestCreature(NPC_EYE_TENTACLE, CTHUN_SEARCH_RANGE, true) };
+
+    for (Creature* creature : targets)
+    {
+        if (!creature || !creature->isTargetableForAttack())
+            continue;
+
+        if (AI_VALUE(Unit*, "current target") == creature)
+            return false; // already on it
+
+        return Attack(creature);
+    }
+
+    return false;
+}
+
+bool CthunPickupGiantTentacleAction::isUseful()
+{
+    return botAI->IsTank(bot);
+}
+
+bool CthunPickupGiantTentacleAction::Execute(Event /*event*/)
+{
+    // Grab the closest un-tanked giant tentacle (pattern from FankrissPickupSpawnAction)
+    Creature* targets[] = { bot->FindNearestCreature(NPC_GIANT_CLAW_TENTACLE, CTHUN_SEARCH_RANGE, true),
+                            bot->FindNearestCreature(NPC_GIANT_EYE_TENTACLE, CTHUN_SEARCH_RANGE, true) };
+
+    Creature* pick = nullptr;
+    for (Creature* creature : targets)
+    {
+        if (!creature || !creature->isTargetableForAttack())
+            continue;
+
+        Unit* victim = creature->GetVictim();
+        if (victim && victim->IsAlive() && victim->IsPlayer())
+            continue; // someone has it
+
+        if (!pick || bot->GetExactDist2d(creature) < bot->GetExactDist2d(pick))
+            pick = creature;
+    }
+
+    if (!pick)
+        return false;
+
+    // Class taunt (pattern from FankrissTankSwapAction)
+    switch (bot->getClass())
+    {
+        case CLASS_PALADIN:
+            if (botAI->CastSpell("hand of reckoning", pick))
+                return true;
+            break;
+        case CLASS_DEATH_KNIGHT:
+            if (botAI->CastSpell("dark command", pick))
+                return true;
+            break;
+        case CLASS_DRUID:
+            if (botAI->CastSpell("growl", pick))
+                return true;
+            break;
+        case CLASS_WARRIOR:
+            if (botAI->CastSpell("taunt", pick))
+                return true;
+            break;
+        default:
+            break;
+    }
+
+    return Attack(pick);
+}
+
+bool CthunAttackGiantTentacleAction::Execute(Event /*event*/)
+{
+    // Burn the weakest giant tentacle that has a living player victim (tank) on it -
+    // un-tanked giants shred DPS (guide: 坦克没拉住别急着打).
+    Creature* best = nullptr;
+    Creature* targets[] = { bot->FindNearestCreature(NPC_GIANT_CLAW_TENTACLE, CTHUN_SEARCH_RANGE, true),
+                            bot->FindNearestCreature(NPC_GIANT_EYE_TENTACLE, CTHUN_SEARCH_RANGE, true) };
+
+    for (Creature* creature : targets)
+    {
+        if (!creature || !creature->isTargetableForAttack())
+            continue;
+
+        Unit* victim = creature->GetVictim();
+        if (!victim || !victim->IsAlive() || !victim->IsPlayer())
+            continue; // not tanked yet - only tanks touch it
+
+        if (!best || creature->GetHealth() < best->GetHealth())
+            best = creature;
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false; // already on it
+
+    return Attack(best);
+}
+
+bool CthunAttackFleshTentacleAction::Execute(Event /*event*/)
+{
+    // In the stomach: kill the flesh tentacles (15802) on the two platforms; two dead
+    // tentacles weaken C'Thun (guide: 先上台子，尽量杀伤血肉触须).
+    Creature* best = nullptr;
+    std::list<Unit*> units;
+    Acore::AnyUnitInObjectRangeCheck check(bot, CTHUN_SEARCH_RANGE);
+    Acore::UnitListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, units, check);
+    Cell::VisitObjects(bot, searcher, CTHUN_SEARCH_RANGE);
+
+    for (Unit* unit : units)
+    {
+        Creature* creature = unit->ToCreature();
+        if (!creature || !creature->IsAlive() || creature->GetEntry() != NPC_FLESH_TENTACLE
+            || !creature->isTargetableForAttack())
+            continue;
+
+        if (!best || creature->GetHealth() < best->GetHealth())
+            best = creature;
+    }
+
+    if (!best)
+        return false;
+
+    if (AI_VALUE(Unit*, "current target") == best)
+        return false; // already on it
+
+    return Attack(best);
+}

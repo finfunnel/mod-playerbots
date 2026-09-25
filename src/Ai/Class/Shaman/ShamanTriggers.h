@@ -99,16 +99,27 @@ public:
 
 // Boost Triggers
 
+// Bloodlust/Heroism raid timing (user rules):
+//   - Felmyst below 35%            - Huhuran below 30%
+//   - Illidan P2 (both Flames of Azzinoth up)   - M'uru/Entropius at pull
+//   - every other boss: 50% boss health
+// The default BoostTrigger "balance" gate compares group/attacker LEVEL strength, not
+// health - against a raid boss it is ~48 at pull, so bloodlust fires on engage. These
+// overrides gate on the current target's health instead (AttackerCountValues.cpp).
+bool ShamanBloodlustTimingCheck(PlayerbotAI* botAI, Player* bot);
+
 class HeroismTrigger : public BoostTrigger
 {
 public:
     HeroismTrigger(PlayerbotAI* botAI) : BoostTrigger(botAI, "heroism") {}
+    bool IsActive() override;
 };
 
 class BloodlustTrigger : public BoostTrigger
 {
 public:
     BloodlustTrigger(PlayerbotAI* botAI) : BoostTrigger(botAI, "bloodlust") {}
+    bool IsActive() override;
 };
 
 class ElementalMasteryTrigger : public BuffTrigger

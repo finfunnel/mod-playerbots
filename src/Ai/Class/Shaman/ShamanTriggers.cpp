@@ -15,6 +15,58 @@
 #include "Unit.h"
 #include <ctime>
 
+// Bloodlust/Heroism opening rules (see ShamanTriggers.h). Single choke point: both
+// triggers are wired only in GenericShamanStrategy ("heroism"/"bloodlust" nodes), so
+// every shaman bot in every content follows these timings.
+bool ShamanBloodlustTimingCheck(PlayerbotAI* botAI, Player* bot)
+{
+    Unit* target = botAI->GetAiObjectContext()->GetValue<Unit*>("current target")->Get();
+    if (!target || !target->IsAlive())
+        return false;
+
+    // Only gate boss fights; trash stays on the default BoostTrigger behaviour.
+    Creature* creature = target->ToCreature();
+    if (!creature || !(creature->isWorldBoss() || creature->IsDungeonBoss()))
+        return BoostTrigger(botAI, "heroism").IsActive();
+
+    switch (creature->GetEntry())
+    {
+        case 25038: // Felmyst (SWP): below 35%
+            return creature->HealthBelowPct(35);
+        case 15509: // Princess Huhuran (AQ40): below 30%
+            return creature->HealthBelowPct(30);
+        case 22917: // Illidan Stormrage (BT): phase 2 - both Flames of Azzinoth up
+        {
+            // P2 = Illidan airborne (unselectable). Flames spawn during P2
+            // (boss_illidan.cpp PHASE_FLYING); require BOTH flames alive so the boost
+            // lands after the adds are out, not during the P1->P2 transition.
+            if (!creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
+                return false;
+            return creature->FindNearestCreature(22997 /* Flame of Azzinoth */, 80.0f, true) != nullptr;
+        }
+        case 25741: // M'uru (SWP): immediately at pull
+            return true;
+        default:    // every other boss: 50% health
+            return creature->HealthBelowPct(50);
+    }
+}
+
+bool HeroismTrigger::IsActive()
+{
+    if (!BoostTrigger::IsActive())
+        return false;
+
+    return ShamanBloodlustTimingCheck(botAI, bot);
+}
+
+bool BloodlustTrigger::IsActive()
+{
+    if (!BoostTrigger::IsActive())
+        return false;
+
+    return ShamanBloodlustTimingCheck(botAI, bot);
+}
+
 bool MainHandWeaponNoImbueTrigger::IsActive()
 {
     Item* const itemForSpell = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);

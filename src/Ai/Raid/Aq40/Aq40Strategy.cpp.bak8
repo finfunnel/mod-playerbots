@@ -1,0 +1,142 @@
+/*
+ * This file is part of the mod-playerbots module for AzerothCore. See AUTHORS file for Copyright
+ * information; released under GNU GPL v2 license, redistribute/modify under version 2 of the License,
+ * or (at your option) any later version.
+ */
+
+#include "Aq40Strategy.h"
+
+void RaidAq40Strategy::InitTriggers(std::vector<TriggerNode*>& triggers)
+{
+    // ---- The Prophet Skeram: mind control / images split / teleport threat resets ----
+
+    // A group member is mind controlled (True Fulfillment): mages sheep them at once -
+    // the MC'd player has boosted damage and instant spells (guide).
+    triggers.push_back(new TriggerNode("skeram member mind controlled",
+            { NextAction("skeram polymorph mind controlled", ACTION_EMERGENCY + 3) }));
+
+    // Split images are up: everyone burns the copies first (heavy AoE, low health)
+    triggers.push_back(new TriggerNode("skeram image up",
+            { NextAction("skeram attack image", ACTION_RAID + 4) }));
+
+    // Boss/image without a living tank (post-split, post-teleport): a free tank picks it
+    // up immediately or it Earth Shocks the raid for 2500 a hit (guide)
+    triggers.push_back(new TriggerNode("skeram untanked",
+            { NextAction("skeram pickup untanked", ACTION_RAID + 3) }));
+
+    // Arcane Explosion (26192) point-blank AoE and the post-teleport "wait for threat"
+    // rule need no dedicated nodes: default engine spread + threat gating cover them.
+
+    // ---- Battleguard Sartura: whirlwind flee / guards first / kidney shot ----
+
+    // Sartura or a Royal Guard is whirlwinding (threat wiped on every hop): everyone
+    // runs out of the blade storm (guide: 旋风斩立刻清除仇恨，停手躲避，勿挂dot/持续治疗)
+    triggers.push_back(new TriggerNode("sartura whirlwind active",
+            { NextAction("sartura flee whirlwind", ACTION_EMERGENCY + 2) }));
+
+    // Royal Guards alive: kill the three guards first, then the boss (guide)
+    triggers.push_back(new TriggerNode("sartura royal guard up",
+            { NextAction("sartura attack royal guard", ACTION_RAID + 4) }));
+
+    // Sartura is stunnable: rogues chain Kidney Shot between whirlwinds to cut raid
+    // damage (guide: 沙尔图拉可以被晕眩，盗贼多打肾击)
+    triggers.push_back(new TriggerNode("sartura whirlwind active",
+            { NextAction("sartura kidney shot", ACTION_RAID + 2) }));
+
+    // 20% enrage (8269) + 10min berserk (27680) are heal/dps checks - no bot-side
+    // positioning, left to the default engine.
+
+    // ---- Bug Trio: fear prep / poison cloud / kill order ----
+
+    // Yauj's periodic AoE fear: priests Fear Ward the tank, shamans Tremor Totem
+    // (guide: 部落萨满插好图腾，联盟牧师上好防恐)
+    triggers.push_back(new TriggerNode("bug trio fear prep",
+            { NextAction("bug trio fear prep", ACTION_RAID + 5) }));
+
+    // Kri died and left a poison cloud: everyone inside runs out (~2000 nature dps)
+    triggers.push_back(new TriggerNode("bug trio poison cloud",
+            { NextAction("bug trio flee poison cloud", ACTION_EMERGENCY + 4) }));
+
+    // Follow the kill order: Yauj -> Vem -> Kri (guide: 先杀亚尔基公主，再集火维姆，
+    // 最后杀克利领主)
+    triggers.push_back(new TriggerNode("bug trio kill order target",
+            { NextAction("bug trio attack kill order", ACTION_RAID + 3) }));
+
+    // Kri's Toxic Volley (25812) nature damage is a heal check; hunters' Aspect of the
+    // Wild is handled by the default class strategies - no dedicated nodes needed.
+
+    // ---- Fankriss: mortal wound swap / sandworms / hatchlings ----
+
+    // Active tank's Mortal Wound stacks at threshold: another tank taunts Fankriss off
+    // (guide: 致命伤口叠加减少治疗效果，坦克注意换坦)
+    triggers.push_back(new TriggerNode("fankriss mortal wound stacks",
+            { NextAction("fankriss tank swap", ACTION_RAID + 6) }));
+
+    // Sandworms hit extremely hard: tanks pick up the loose ones, everyone burns them
+    // before returning to the boss (guide: 沙虫伤害极高，坦克拉好，优先击杀)
+    triggers.push_back(new TriggerNode("fankriss spawn up",
+            { NextAction("fankriss attack spawn", ACTION_RAID + 5),
+              NextAction("fankriss pickup spawn", ACTION_RAID + 5) }));
+
+    // Hatchlings (15962) respawn endlessly - the guide says kite them (mages frost nova)
+    // rather than kill; kiting is beyond the bot engine, default cleave handles the rest.
+    // FIXME(攻略未明确): 机器人无风筝执行能力，甲虫交由默认顺劈/坦克拖住。
+
+    // ---- Viscidus: frost phase / frozen melee / globs / toxin clouds ----
+
+    // Not frozen yet: mages spam Frostbolt to stack the freeze counter
+    // (guide: 法师直接搓一级寒冰箭)
+    triggers.push_back(new TriggerNode("viscidus needs frost",
+            { NextAction("viscidus cast frostbolt", ACTION_RAID + 6) }));
+
+    // Fully frozen (25937): everyone melees with fast weapons to shatter it
+    // (guide: 冻结后全体换快速武器物理攻击boss)
+    triggers.push_back(new TriggerNode("viscidus frozen",
+            { NextAction("viscidus attack frozen", ACTION_RAID + 6) }));
+
+    // Split globs up: kill as many as possible before they rejoin - each dead glob
+    // removes 5% of the boss HP (guide: 打掉尽可能多的分身)
+    triggers.push_back(new TriggerNode("viscidus glob up",
+            { NextAction("viscidus attack glob", ACTION_RAID + 5) }));
+
+    // Toxic Slime cloud nearby: run out of the poison (guide: 躲开毒云)
+    triggers.push_back(new TriggerNode("viscidus toxin near",
+            { NextAction("viscidus flee toxin", ACTION_EMERGENCY + 4) }));
+
+    // Poisonbolt Volley DoT: druids/shamans cure poison via default class strategies
+    // (party member cure poison / cleanse spirit) - no dedicated nodes needed.
+
+    // ---- Princess Huhuran: 30% berserk soakers ----
+
+    // Berserk (26068) at 30%: Poison Bolt AoE hits the 15 players nearest the boss -
+    // melee soakers stack on her so the bolts land on the resistant melee pack
+    // (guide: 沙包自然抗职业贴身吃毒镖)
+    triggers.push_back(new TriggerNode("huhuran berserk",
+            { NextAction("huhuran soak", ACTION_RAID + 4) }));
+
+    // Frenzy (26051): hunters' default tranquilizing-shot strategy already fires on
+    // enrage auras (GenericHunterStrategy "tranquilizing shot enrage") - no node here.
+    // Nature resistance (aspect/potions) and 5min hard enrage are gear/dps checks.
+
+    // ---- Twin Emperors: warlock Veklor tank / tank swap / damage-type discipline ----
+
+    // Veklor (caster emperor) has no living victim (start or post-teleport): the warlock
+    // spell tank grabs him with searing pain (guide: 术士抗魔皇，传送后拉好怪)
+    triggers.push_back(new TriggerNode("twin emp veklor untanked",
+            { NextAction("twin emp veklor pickup", ACTION_RAID + 6) }));
+
+    // Veknilash tank eats Unbalancing Strike (-100 defense): another tank taunts off
+    // (guide: 重压打击减100防御，战士注意换坦)
+    triggers.push_back(new TriggerNode("twin emp tank swap",
+            { NextAction("twin emp tank swap", ACTION_RAID + 6) }));
+
+    // Melee on the magic-immune Veklor = zero damage + Arcane Burst (568) to the pack:
+    // switch to the physically-vulnerable twin (guide: 注意输出伤害类型)
+    triggers.push_back(new TriggerNode("twin emp wrong damage type",
+            { NextAction("twin emp attack correct twin", ACTION_RAID + 5) }));
+
+    // Twin-brother healing (7393) within 60yd: keep the emperors tanked apart. That is
+    // tank positioning set up at the pull, not a reactive in-fight action - no node.
+    // Hunters keep damage-type discipline via the switch above; heal bolts/blizzard are
+    // heal/movement checks handled by default spread.
+}
