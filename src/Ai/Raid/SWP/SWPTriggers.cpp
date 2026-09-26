@@ -54,6 +54,85 @@ GameObject* FindOuterRift(Player* bot)
 }
 } // namespace
 
+// ---- Felmyst flight-phase lane helpers (see SunwellFelmystIDs in SWPTriggers.h).
+// Out-of-namespace on purpose: the breath-avoid action in SWPActions.cpp calls them too,
+// so they need external linkage (declared in SWPTriggers.h). ----
+
+// X centre of a breath lane. Lane index order matches boss_felmyst.cpp: 0=top, 1=middle, 2=bottom.
+float FelmystLaneX(int lane)
+{
+    switch (lane)
+    {
+        case 0: return static_cast<float>(FELMYST_LANE_X_TOP);
+        case 1: return static_cast<float>(FELMYST_LANE_X_MID);
+        default: return static_cast<float>(FELMYST_LANE_X_BOT);
+    }
+}
+
+// Which lane the dragon is currently sweeping, judged from its own position (X + Y gate).
+// boss_felmyst.cpp flies straight along one lane from north to south (or back), so while it
+// breathes the dragon's X is always near one lane centre AND its Y is inside the lane corridor
+// (515..704). The reposition corners are OUTSIDE that Y range (LeftSide 1469,729 / RightSide
+// 1458,502) but their X ≈ MID lane - the Y gate is what prevents a false "MID swept" at corners.
+// Returns -1 if the dragon is airborne but not actively on a lane (repositioning, takeoff,
+// landing or the ground phase).
+int FelmystCurrentLane(Player* bot)
+{
+    Unit* felmyst = bot->FindNearestCreature(NPC_FELMYST, 100.0f, true);
+    if (!felmyst || !felmyst->IsAlive() || !felmyst->IsFlying())
+        return -1;
+
+    // Lane corridor bounds from boss_felmyst.cpp: LeftSideLanes Y~701-704 (north)
+    // RightSideLanes Y~515-520 (south). Reposition corners are outside these.
+    float const y = felmyst->GetPositionY();
+    if (y > 515.0f && y < 704.0f)
+    {
+        float const x = felmyst->GetPositionX();
+        if (std::fabs(x - static_cast<float>(FELMYST_LANE_X_TOP)) <= static_cast<float>(FELMYST_LANE_TOLERANCE))
+            return 0;
+        if (std::fabs(x - static_cast<float>(FELMYST_LANE_X_MID)) <= static_cast<float>(FELMYST_LANE_TOLERANCE))
+            return 1;
+        if (std::fabs(x - static_cast<float>(FELMYST_LANE_X_BOT)) <= static_cast<float>(FELMYST_LANE_TOLERANCE))
+            return 2;
+    }
+    return -1;
+}
+
+// The safe (non-swept) lane to run to when THIS lane is being breathed on, chosen as the
+// farthest of the two remaining lanes from the bot's CURRENT X. Keeps the bot decisive: once it
+// commits to the far side it runs straight there (no back-and-forth as the dragon sweeps).
+int FelmystSafeLane(Player* bot, int sweptLane)
+{
+    // The other two lanes; prefer the one farthest from the bot so a fog-strip edge cannot clip.
+    int candidateA = -1, candidateB = -1;
+    for (int lane = 0; lane < 3; ++lane)
+    {
+        if (lane != sweptLane)
+        {
+            if (candidateA < 0) candidateA = lane;
+            else                 candidateB = lane;
+        }
+    }
+    float const distA = std::fabs(bot->GetPositionX() - FelmystLaneX(candidateA));
+    float const distB = std::fabs(bot->GetPositionX() - FelmystLaneX(candidateB));
+    return (distA >= distB) ? candidateA : candidateB;
+}
+
+// Lateral (EAST-WEST) flee target away from a hazard, used by the vapor-trail escape and the
+// eye-beam kite (user: 东西方向引, 不穿场南北). Uses the BOT's X, not the hazard's: push the bot
+// `distance` further away from the hazard along X, keeping the bot's CURRENT Y. North/south
+// movement is what drags poison across the raid or off the arena, so this never changes Y.
+bool FelmystLateralEscapePoint(Player* bot, Unit* hazard, float distance, float& outX, float& outY)
+{
+    outY = bot->GetPositionY(); // keep our current Y - never move north/south
+
+    float const botX = bot->GetPositionX();
+    float const hazardX = hazard ? hazard->GetPositionX() : botX;
+    // Away from the hazard along X: if we are east of it keep moving east, west -> west.
+    outX = (botX >= hazardX) ? botX + distance : botX - distance;
+    return true;
+}
+
 bool KalecgosSpectralRiftAvailableTrigger::IsActiveInEncounter()
 {
     // Inside already or locked out by Spectral Exhaustion -> cannot use a portal
@@ -255,6 +334,15 @@ bool BrutallusTankSwapTrigger::IsActiveInEncounter()
         brutallus->FindCurrentSpellBySpellId(SPELL_STOMP))
         return false;
 
+    // Taunt ONLY from the boss's back (user: tank要注意boss的朝向). His facing carries
+    // the 120-degree cone: a taunt from the side flips the cone sideways across the raid
+    // mid-transit and slashes camps nobody set up to soak. GetRelativeAngle is measured
+    // against his facing - the cone's own frame (Position.h) - so >= 120 degrees puts the
+    // taunter inside the rear 60-degree sector and the flip lands as a clean 180 onto his
+    // own camp (which is already stacked there with him).
+    if (brutallus->GetRelativeAngle(bot) < 2.0f * static_cast<float>(M_PI) / 3.0f)
+        return false;
+
     // Swap when the active tank's slash vulnerability reaches the stack threshold
     // (stack idiom from FankrissMortalWoundStacksTrigger) or he is Stomped.
     if (victim->HasAura(SPELL_STOMP))
@@ -268,14 +356,22 @@ bool BrutallusTankSwapTrigger::IsActiveInEncounter()
 
 bool BrutallusSoakPositionTrigger::IsActiveInEncounter()
 {
-    // Tanks have their own swap logic; healers must keep raid-wide range, they soak
-    // by default engine placement near the camps. Everyone else belongs to a camp.
-    if (botAI->IsTank(bot) || botAI->IsHeal(bot))
+    // Healers must keep raid-wide range, they soak by default engine placement near
+    // the camps. Everyone else belongs to a camp. The ACTIVE tank holds the cone
+    // where he stands; every other tank joins too: an off-duty tank idling anywhere
+    // in front keeps stacking the Meteor Slash fire vulnerability on himself (the
+    // cone is 120 degrees wide and 65 yards long on this server, spell_cone table),
+    // which blocks his taunt turn - the swap trigger waits for the debuff to expire,
+    // so the rotation would stall and the active tank would ladder stacks forever.
+    if (botAI->IsHeal(bot))
         return false;
 
     Unit* brutallus = AI_VALUE2(Unit*, "find target", "brutallus");
     if (!brutallus || !brutallus->isTargetableForAttack())
         return false;
+
+    if (botAI->IsTank(bot))
+        return brutallus->GetVictim() != bot; // off-duty tank: wait behind the boss
 
     // Only while the raid is positioned for a slash cycle: always true in practice,
     // gating kept so the trigger dies the moment the fight ends.
@@ -375,66 +471,43 @@ bool FelmystGasNovaOnSelfTrigger::IsActiveInEncounter()
 
 bool FelmystDeepBreathTrigger::IsActiveInEncounter()
 {
-    // Only non-tanks shelter in the safe half; the tank stays with the boss so the melee
-    // breath does not run through the whole raid, and it collects skeletons from the safe zone.
-    if (botAI->IsTank(bot))
+    // DYNAMIC LANE DODGE (user: 看龙在哪一条 lane 就是喷哪边). Active only while the dragon is
+    // sweeping the lane THIS bot currently stands inside. P2 flight signal is IsFlying() -
+    // isTargetableForAttack() stays TRUE during P2 (SetInvincibility is a private bool, so no
+    // NON_ATTACKABLE flag). When the dragon sweeps a different lane, or is repositioning between
+    // lanes (FelmystCurrentLane < 0), there is nothing to dodge and we hold position.
+    Unit* felmyst = bot->FindNearestCreature(NPC_FELMYST, 100.0f, true);
+    if (!felmyst || !felmyst->IsAlive() || !felmyst->IsFlying())
         return false;
 
-    Unit* felmyst = AI_VALUE2(Unit*, "find target", "felmyst");
-    if (!felmyst || !felmyst->IsAlive())
-        return false;
+    int const currentLane = FelmystCurrentLane(bot);
+    if (currentLane < 0)
+        return false;   // no lane is actively being breathed on (repositioning / approaching)
 
-    // P2: Felmyst is airborne. Use IsFlying() - isTargetableForAttack() stays TRUE during P2
-    // (core SetInvincibility is a private bool, no NON_ATTACKABLE flag), which would disable
-    // the whole shelter. During this entire phase the breath can land anywhere on a random
-    // lane, and the fog lingers after each pass - so every non-tank stays on the dragon's
-    // opposite half until it lands again.
-    if (!felmyst->IsFlying())
-        return false;
-
-    // SAFE ZONE = the half the dragon is NOT facing. The dragon faces its sweep direction:
-    // when it sits on the south lanes (Y~515) it faces north (orientation sin>0) and sweeps
-    // the north half -> north is the DANGER zone, south is safe; symmetric for the north half.
-    // Use the dragon's facing, not its position: facing flips exactly as it prepares the next
-    // breath, which is the moment bots must react (user: 龙头朝向 = 危险方向, 反方向 = 安全区).
-    bool facesNorth = std::sin(felmyst->GetOrientation()) >= 0.0f; // danger on north -> safe south
-    bool facesSouth = !facesNorth;
-
-    // This bot is safe only if it is on the half opposite the facing.
-    float myY = bot->GetPositionY();
-    bool iAmNorth = myY >= 660.0f;
-    bool iAmSouth = myY <= 570.0f;
-    bool iAmMiddle = myY > 570.0f && myY < 660.0f;
-
-    // Unsafe = my half is the danger half (the dragon is sweeping it).
-    if (facesNorth && (iAmNorth || iAmMiddle))
-        return true;
-    if (facesSouth && (iAmSouth || iAmMiddle))
-        return true;
-
-    return false;
+    // Only react when THIS bot stands inside the swept lane.
+    return std::fabs(bot->GetPositionX() - FelmystLaneX(currentLane)) <= static_cast<float>(FELMYST_LANE_TOLERANCE);
 }
 
 bool FelmystBlazingDeadNearbyTrigger::IsActiveInEncounter()
 {
-    // Tanks pick up skeletons within pickup range; non-tank DPS attack the ones reachable
-    // from the safe half within attack range. Both roles share the trigger and the strategy
-    // decides which action (pickup for tanks, attack for everyone else).
-    // DPS search wide (60y) so a skeleton on the other end of the safe half still becomes an
-    // attack target - otherwise DPS fall back to the (P2-hold) boss attack and never switch.
-    float radius = botAI->IsTank(bot)
-        ? static_cast<float>(FELMYST_BLAZING_DEAD_PICKUP_RANGE)
-        : 60.0f;
+    // User: 出小骷髅, 除了被点名的,其他人优先击杀小骷髅, 绝不出北边.
+    // Tanks pick up within close range; RANGED attack far (60y); MELEE only what is already
+    // within attack reach so no one is ever tempted to chase south. All non-tanks share this
+    // trigger; the strategy picks the action.
+    // No IsInCombat() gate: freshly-summoned skeletons are still burning kills.
+    float radius = 60.0f;
+    if (botAI->IsTank(bot))
+        radius = static_cast<float>(FELMYST_BLAZING_DEAD_PICKUP_RANGE);
+    else if (botAI->IsMelee(bot))
+        radius = static_cast<float>(FELMYST_BLAZING_DEAD_PICKUP_RANGE); // melee only hits the nearby pack
 
     Creature* skeleton = bot->FindNearestCreature(NPC_BLAZING_DEAD, radius, true);
-    if (!skeleton || !skeleton->IsAlive() || !skeleton->IsInCombat())
+    if (!skeleton || !skeleton->IsAlive())
         return false;
 
-    // Non-tanks only act on skeletons reachable without leaving the safe zone (within 60y the
-    // exact-danger-half check lives in the action so a far skeleton across the mid line is
-    // still rejected there).
+    // Non-tanks only act on skeletons within range - the exact reach check lives in the action.
     if (!botAI->IsTank(bot))
-        return bot->GetExactDist2d(skeleton) <= 60.0f;
+        return bot->GetExactDist2d(skeleton) <= radius;
 
     return true;
 }

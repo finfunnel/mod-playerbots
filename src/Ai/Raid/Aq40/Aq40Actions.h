@@ -212,6 +212,19 @@ public:
     bool Execute(Event event) override;
 };
 
+// The twins are within 60yd (Heal Brother range): the tank currently holding aggro drags
+// their twin directly away from the other boss. Works for both the melee tank on
+// Veknilash (backwards walk) and the warlock spell tank on Veklor (Veklor chases the
+// warlock once searing pain threat is established).
+// (guide: 保持双子皇帝之间距离)
+class TwinEmpSeparateAction : public MovementAction
+{
+public:
+    TwinEmpSeparateAction(PlayerbotAI* ai) : MovementAction(ai, "twin emp separate") {}
+    bool Execute(Event event) override;
+    bool isUseful() override;
+};
+
 // ---- Ouro ----
 
 // Run away from a chasing dirt mound (15712): mounds pick a random player every 5-10s,

@@ -9,6 +9,7 @@
 #include "CellImpl.h"
 #include "Creature.h"
 #include "DynamicObject.h"
+#include "EncounterHelpers.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
@@ -664,6 +665,79 @@ bool TwinEmpAttackCorrectTwinAction::Execute(Event /*event*/)
         return false; // already on the right twin
 
     return Attack(veknilash);
+}
+
+// ---- Twin Emperors: separation ----
+
+bool TwinEmpSeparateAction::isUseful()
+{
+    // The trigger already gates on "bot is a twin's victim" - no class/spec restriction
+    // needed here. The warlock spell tank on Veklor is not IsTank() but must still drag.
+    return true;
+}
+
+bool TwinEmpSeparateAction::Execute(Event /*event*/)
+{
+    Creature* veklor = bot->FindNearestCreature(NPC_VEKLOR, TWIN_EMPERORS_SEARCH_RANGE, true);
+    Creature* veknilash = bot->FindNearestCreature(NPC_VEKNILASH, TWIN_EMPERORS_SEARCH_RANGE, true);
+    if (!veklor || !veknilash)
+        return false;
+
+    // Identify which twin this bot is tanking and which is "the other one"
+    Unit* veklorVictim = veklor->GetVictim();
+    Unit* veknilashVictim = veknilash->GetVictim();
+
+    Creature* myBoss = nullptr;
+    Creature* otherBoss = nullptr;
+
+    if (veknilashVictim == bot)
+    {
+        myBoss = veknilash;
+        otherBoss = veklor;
+    }
+    else if (veklorVictim == bot)
+    {
+        myBoss = veklor;
+        otherBoss = veknilash;
+    }
+    else
+    {
+        return false; // not tanking either twin (shouldn't happen - trigger gates this)
+    }
+
+    // Direction: from the other boss through my boss, continuing outward. This maximizes
+    // separation per yard moved (geometry: moving along the connecting line away from
+    // the other boss adds the most distance).
+    float len = myBoss->GetExactDist2d(otherBoss);
+    float dx, dy;
+    if (len < 1.0f)
+    {
+        // Bosses on top of each other: pick an arbitrary direction (east)
+        dx = 1.0f;
+        dy = 0.0f;
+        len = 1.0f;
+    }
+    else
+    {
+        dx = (myBoss->GetPositionX() - otherBoss->GetPositionX()) / len;
+        dy = (myBoss->GetPositionY() - otherBoss->GetPositionY()) / len;
+    }
+
+    // Target: keep walking until we are clearly past the heal range (60 + 10 buffer)
+    float targetDist = static_cast<float>(TWIN_EMPERORS_SEPARATION) + 10.0f;
+    float targetX = myBoss->GetPositionX() + dx * targetDist;
+    float targetY = myBoss->GetPositionY() + dy * targetDist;
+
+    // GetStepToPosition computes backwards internally (bot has aggro + in melee range =
+    // walk backwards so the boss chases). Pattern from MagtheridonMainTankPositionBossAction.
+    bool backwards = false;
+    float stepX, stepY;
+    if (!EncounterHelpers::GetStepToPosition(bot, Position(targetX, targetY, bot->GetPositionZ()),
+                                              1.0f, myBoss, stepX, stepY, backwards))
+        return false; // already arrived
+
+    return MoveTo(bot->GetMapId(), stepX, stepY, bot->GetPositionZ(), false, false,
+                  false, false, MovementPriority::MOVEMENT_COMBAT, true, backwards);
 }
 
 // ---- Ouro ----

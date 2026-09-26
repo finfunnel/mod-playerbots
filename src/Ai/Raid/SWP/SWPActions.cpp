@@ -155,9 +155,16 @@ bool KalecgosBalanceRealmDpsAction::Execute(Event /*event*/)
 
 bool BrutallusBurnSpreadAction::isUseful()
 {
-    // Only non-tanks flee with Burn; a tank holds the soak cone in place and the
-    // raid's "burn nearby" trigger keeps everyone clear of him instead.
-    return !botAI->IsTank(bot);
+    // Non-tanks always flee with Burn. A tank only holds the soak cone in place
+    // while he is the ACTIVE victim - the raid's "burn nearby" trigger keeps
+    // everyone clear of him instead. An off-duty tank now waits in the rear
+    // cluster behind the boss, so he must spread too or he re-seeds Burn through
+    // the whole camp waiting there (Burn jumps within 3 yards).
+    if (!botAI->IsTank(bot))
+        return true;
+
+    Unit* brutallus = AI_VALUE2(Unit*, "find target", "brutallus");
+    return brutallus && brutallus->GetVictim() != bot;
 }
 
 bool BrutallusBurnSpreadAction::Execute(Event event)
@@ -231,11 +238,55 @@ bool BrutallusTankSwapAction::Execute(Event /*event*/)
     return Attack(brutallus);
 }
 
+namespace
+{
+// Off-cone waiting spot behind Brutallus, opposite the ACTIVE cone (direction
+// boss->victim, flipped). This server's Meteor Slash cone is 120 degrees wide and
+// 65 yards long (spell_cone table -> Spell::SelectImplicitConeTargets), so behind
+// the boss is the one place no boss facing can hit.
+void GetBrutallusBehindSpot(Unit* brutallus, Unit* fallback, float& x, float& y)
+{
+    float behindAngle = brutallus->GetAngle(fallback) + M_PI;
+    if (Unit* victim = brutallus->GetVictim())
+        behindAngle = brutallus->GetAngle(victim) + M_PI;
+
+    float const waitDist = brutallus->GetCombatReach() + 6.0f;
+    x = brutallus->GetPositionX() + waitDist * std::cos(behindAngle);
+    y = brutallus->GetPositionY() + waitDist * std::sin(behindAngle);
+}
+} // namespace
+
 bool BrutallusSoakPositionAction::Execute(Event /*event*/)
 {
     Unit* brutallus = AI_VALUE2(Unit*, "find target", "brutallus");
     if (!brutallus || !brutallus->IsAlive())
         return false;
+
+    float const tolerance = static_cast<float>(BRUTALLUS_SLASH_TOLERANCE);
+
+    // Off-duty tank (the trigger guarantees the boss' victim is not me): wait behind
+    // the boss together with the off-duty camp. Any front-side idle spot keeps eating
+    // the 120-degree slash cone and stacking the +75% fire vulnerability, which blocks
+    // my taunt turn (the swap trigger waits for the debuff to fully expire). Behind
+    // the boss no facing reaches me, and when I taunt the cone flips onto me with my
+    // camp already stacked next to me, so the first slash stays shared.
+    if (PlayerbotAI::IsTank(bot))
+    {
+        float x, y;
+        GetBrutallusBehindSpot(brutallus, bot, x, y);
+        if (bot->GetExactDist2d(x, y) > tolerance + 2.0f)
+            // FORCED, not COMBAT: combat-priority moves get vetoed by the same-priority
+            // window and overridden every tick by the attack strategies' chase moves, so
+            // the tank ping-pongs mid-transit (Kalecgos rift approach, same pattern).
+            return MoveTo(bot->GetMapId(), x, y, bot->GetPositionZ(), false, false, false, false,
+                          MovementPriority::MOVEMENT_FORCED, true);
+        // PARKED (user: tank不要乱动): keep consuming the tick - the engine breaks on the
+        // first action that returns true (Engine.cpp DoNextAction) - so the generic melee
+        // chase cannot drag the tank back into the boss's back and shuffle the cone around.
+        // The taunt (RAID+3) and burn spread (EMERGENCY+3) outrank this and still fire; the
+        // ACTIVE tank is moved by nothing at all (the trigger excludes the victim).
+        return true;
+    }
 
     // Anchor assignment: living tanks in group order define the camps (group order
     // is stable for the fight), this bot's camp = its index parity among living
@@ -271,7 +322,6 @@ bool BrutallusSoakPositionAction::Execute(Event /*event*/)
     Player* anchor = tanks[myIndex % tanks.size()];
 
     bool anchorTanking = brutallus->GetVictim() == anchor;
-    float const tolerance = static_cast<float>(BRUTALLUS_SLASH_TOLERANCE);
 
     if (anchorTanking)
     {
@@ -283,14 +333,10 @@ bool BrutallusSoakPositionAction::Execute(Event /*event*/)
         return MoveNear(anchor, tolerance);
     }
 
-    // Anchor tank is off-duty: wait behind the boss, opposite the ACTIVE cone
-    // (direction boss->victim, flipped). Out of the slash and clear for the next swap.
-    float behindAngle = brutallus->GetAngle(anchor) + M_PI;
-    if (Unit* victim = brutallus->GetVictim())
-        behindAngle = brutallus->GetAngle(victim) + M_PI;
-    float const waitDist = brutallus->GetCombatReach() + 6.0f;
-    float x = brutallus->GetPositionX() + waitDist * std::cos(behindAngle);
-    float y = brutallus->GetPositionY() + waitDist * std::sin(behindAngle);
+    // Anchor tank is off-duty: wait behind the boss, opposite the ACTIVE cone.
+    // Out of the slash and clear for the next swap.
+    float x, y;
+    GetBrutallusBehindSpot(brutallus, anchor, x, y);
     if (bot->GetExactDist2d(x, y) <= tolerance + 2.0f)
         return false;
     return MoveTo(bot->GetMapId(), x, y, bot->GetPositionZ(), false, false, false, false,
@@ -325,38 +371,13 @@ bool FelmystVaporKiteAction::Execute(Event /*event*/)
     if (!vapor)
         return false;
 
-    // Guide: the beam follows its target - keep it away from the raid by moving away from
-    // both the orb and the group center.
-    float vaporAngle = vapor->GetAngle(bot);
-
-    Group* group = bot->GetGroup();
-    if (group)
-    {
-        float cx = 0.0f, cy = 0.0f;
-        uint32 count = 0;
-        for (GroupReference* gref = group->GetFirstMember(); gref; gref = gref->next())
-        {
-            Player* member = gref->GetSource();
-            if (member && member->IsAlive() && member != bot)
-            {
-                cx += member->GetPositionX();
-                cy += member->GetPositionY();
-                ++count;
-            }
-        }
-        if (count > 0)
-        {
-            Position const center(cx / count, cy / count, bot->GetPositionZ());
-            float const groupAngle = center.GetAngle(bot);
-            // Bisect away-from-orb and away-from-raid directions
-            float const bisect = std::atan2(
-                (std::sin(vaporAngle) + std::sin(groupAngle)) / 2.0f,
-                (std::cos(vaporAngle) + std::cos(groupAngle)) / 2.0f);
-            return Move(bisect, 15.0f);
-        }
-    }
-
-    return Move(vaporAngle, 15.0f);
+    // The beam follows this bot. Kite it LATERALLY (east-west) so the poison trail it leaves
+    // runs across the arena sideways and never through the north shelter where the raid stands.
+    // The beam is dragged by our movement; moving X-only keeps the trail off the north line
+    // (user: 东西方向引, 不穿场南北).
+    float outX = 0.0f, outY = 0.0f;
+    FelmystLateralEscapePoint(bot, vapor, 15.0f, outX, outY);
+    return MoveTo(bot->GetMapId(), outX, outY, bot->GetPositionZ());
 }
 
 bool FelmystVaporTrailEscapeAction::Execute(Event /*event*/)
@@ -365,9 +386,12 @@ bool FelmystVaporTrailEscapeAction::Execute(Event /*event*/)
     if (!trail)
         return false;
 
-    // The poison cloud is large and lingers: move well out of it (20 yards), not a token hop.
-    float angle = trail->GetAngle(bot);
-    return Move(angle, 20.0f);
+    // The poison cloud is large and lingers: move well out of it (20 yards). LATERAL (east-west)
+    // only - never drift north/south, or the escape drags the poison trail across the raid or
+    // off the corridor into the shelter/wall (user: 东西方向引, 不穿场南北).
+    float outX = 0.0f, outY = 0.0f;
+    FelmystLateralEscapePoint(bot, trail, 20.0f, outX, outY);
+    return MoveTo(bot->GetMapId(), outX, outY, bot->GetPositionZ());
 }
 
 bool FelmystCorrosionAction::Execute(Event /*event*/)
@@ -416,46 +440,38 @@ bool FelmystGasNovaSelfDispelAction::Execute(Event /*event*/)
 
 bool FelmystDeepBreathAvoidAction::Execute(Event /*event*/)
 {
-    Unit* felmyst = AI_VALUE2(Unit*, "find target", "felmyst");
-    if (!felmyst || !felmyst->IsAlive())
+    Unit* felmyst = bot->FindNearestCreature(NPC_FELMYST, 100.0f, true);
+    if (!felmyst || !felmyst->IsAlive() || !felmyst->IsFlying())
         return false;
 
-    // Only shelter while airborne (P2). IsFlying() - isTargetableForAttack() stays true during
-    // P2 (core SetInvincibility is a private bool, no NON_ATTACKABLE flag), so it is useless here.
-    if (!felmyst->IsFlying())
+    // Dynamic lane dodge (user: 看龙在哪一条 lane 就是喷哪边): when the dragon is sweeping
+    // THIS bot's current lane, run sideways to the farthest non-swept lane. When it sweeps a
+    // different lane, stay put - standing on an unswept lane is safe. When it is repositioning
+    // (FelmystCurrentLane < 0) there is no active fog strip, so also stay put.
+    int const sweptLane = FelmystCurrentLane(bot);
+    if (sweptLane < 0)
+        return false;                          // no lane is actively being breathed on
+
+    // This bot is unsafe only if it currently stands inside the swept lane.
+    if (std::fabs(bot->GetPositionX() - FelmystLaneX(sweptLane)) > static_cast<float>(FELMYST_LANE_TOLERANCE))
+        return false;                          // already safe on another lane - do not move
+
+    int const safeLane = FelmystSafeLane(bot, sweptLane);
+    float const targetX = FelmystLaneX(safeLane);
+
+    // Already on the safe lane: nothing to do.
+    if (std::fabs(bot->GetPositionX() - targetX) <= static_cast<float>(FELMYST_LANE_TOLERANCE))
         return false;
 
-    float myY = bot->GetPositionY();
-
-    // SAFE ZONE = opposite the dragon's facing (user: 龙头朝向 = 危险方向, 反方向 = 安全区).
-    // The dragon faces the half it is about to sweep; the opposite half is always safe.
-    bool facesNorth = std::sin(felmyst->GetOrientation()) >= 0.0f; // danger north -> safe south
-    bool facesSouth = !facesNorth;
-
-    // Aim for the middle of the SAFE half so neither a wall-side sweep nor lingering fog at
-    // the far edge clips us. Danger north lane wall ~701 / south wall ~515 / mid 615:
-    //   dragon facing north (danger north) -> safe south centre ~570
-    //   dragon facing south (danger south) -> safe north centre ~660.
-    float targetY = facesNorth ? 570.0f : 660.0f;
-
-    // Spread bots across X so the safe zone is not a single pile: offset by a stable per-bot
-    // value (GUID-derived) inside a +-9 yard band around the centre X.
-    float baseX = (facesNorth ? 1472.0f : 1476.0f);
-    float spread = static_cast<float>((bot->GetGUID().GetCounter() % 7) - 3) * 3.0f; // -9..+9
-    float targetX = baseX + spread;
-
-    // Already inside the safe middle: hold (return false lets the rest of the rotation run,
-    // e.g. attacking skeletons from the safe edge).
-    bool safe = (targetY > 615.0f) ? myY >= 640.0f : myY <= 590.0f;
-    if (safe)
-        return false;
-
-    return MoveTo(bot->GetMapId(), targetX, targetY, bot->GetPositionZ());
+    return MoveTo(bot->GetMapId(), targetX, bot->GetPositionY(), bot->GetPositionZ());
 }
 
 bool FelmystBlazingDeadAttackAction::isUseful()
 {
-    // Non-tank DPS only; the tank uses Pickup instead.
+    // EVERY non-tank kills skeletons (user: 除了被点名的,其他人优先击杀小骷髅). Tanks keep
+    // picking them up instead; the "chased by the eye beam" bot is handled separately by the
+    // vapor kite action at a higher priority. Melee included, but they only engage skeletons
+    // already within reach (enforced in Execute) - no chasing.
     return !botAI->IsTank(bot);
 }
 
@@ -467,20 +483,28 @@ bool FelmystBlazingDeadAttackAction::Execute(Event /*event*/)
     if (!felmyst || !felmyst->IsAlive() || !felmyst->IsFlying())
         return false;
 
-    // Only commit from the SAFE half (opposite the dragon's facing - same rule as the shelter).
-    // The dragon faces the half it sweeps, so the safe half is where we may DPS a skeleton.
-    bool facesNorth = std::sin(felmyst->GetOrientation()) >= 0.0f; // danger north -> safe south
-    float myY = bot->GetPositionY();
-    bool iAmSafe = facesNorth ? (myY <= 570.0f) : (myY >= 660.0f);
-    if (!iAmSafe)
-        return false; // do not chase a skeleton into the fog side
+    // Dynamic-lane rule: never fight a skeleton while standing inside the lane being swept -
+    // the breath fog (45717 charm = death) arrives faster than the kill. The deep-breath avoid
+    // action (higher priority) pulls us out first; this guard stops us stopping to fight in it.
+    int const currentLane = FelmystCurrentLane(bot);
+    if (currentLane >= 0 &&
+        std::fabs(bot->GetPositionX() - FelmystLaneX(currentLane)) <= static_cast<float>(FELMYST_LANE_TOLERANCE))
+        return false; // standing in the lane being swept - do not stop to fight
 
     Creature* skeleton = bot->FindNearestCreature(NPC_BLAZING_DEAD, 60.0f, true);
-    if (!skeleton || !skeleton->IsAlive() || !skeleton->IsInCombat())
+    if (!skeleton || !skeleton->IsAlive())
         return false;
 
-    if (skeleton->GetVictim() && skeleton->GetVictim()->IsAlive() && skeleton->GetVictim() != bot)
-        return false; // tank already has it
+    // Melee pre-filter: only engage a skeleton already within reach - otherwise AttackAction would
+    // path us onto it, drifting us off our safe lane. Ranged (non-melee) reach straight from
+    // wherever they stand (60y search). FindNearestCreature picks the closest; if a melee bot
+    // has none within reach it has no legal target and simply keeps its position on the lane.
+    if (PlayerbotAI::IsMelee(bot) &&
+        bot->GetExactDist(skeleton) > static_cast<float>(FELMYST_BLAZING_DEAD_PICKUP_RANGE))
+        return false; // melee: only hit the pack that is already within reach
+
+    // IsInCombat no longer gates the kill: a freshly-summoned skeleton may not have engaged
+    // yet. Everyone (melee + ranged) burns it without leaving their current lane.
 
     // Do not commit to a skeleton while a poison cloud is near us - moving to the skeleton
     // (or its stray pathing) could step into the vapor that just wiped us.
@@ -549,9 +573,19 @@ bool FelmystBlazingDeadPickupAction::isUseful()
 
 bool FelmystBlazingDeadPickupAction::Execute(Event /*event*/)
 {
+    // Dynamic-lane rule: the tank picks up only while NOT standing in the lane being swept (the
+    // deep-breath avoid action owns the move out of it first). Standing on an unswept lane the
+    // tank collects skeletons exactly like before.
+    int const currentLane = FelmystCurrentLane(bot);
+    if (currentLane >= 0 &&
+        std::fabs(bot->GetPositionX() - FelmystLaneX(currentLane)) <= static_cast<float>(FELMYST_LANE_TOLERANCE))
+        return false; // currently inside the swept lane - the deep-breath avoid moves us out first
+
     Creature* skeleton = bot->FindNearestCreature(NPC_BLAZING_DEAD,
         static_cast<float>(FELMYST_BLAZING_DEAD_PICKUP_RANGE), true);
-    if (!skeleton || !skeleton->IsAlive() || !skeleton->IsInCombat())
+    // No IsInCombat() gate: a freshly-summoned skeleton is picked up the same as an engaged one
+    // (user: 远程优先打小骷髅 -> the tank must be ready to hold the pack the ranged is burning).
+    if (!skeleton || !skeleton->IsAlive())
         return false;
 
     // Do not walk into poison to collect a skeleton - the tank dies just like anyone else.

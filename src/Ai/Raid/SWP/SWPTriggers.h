@@ -93,8 +93,26 @@ enum SunwellFelmystIDs
     FELMYST_ENCAPSULATE_SPREAD_RANGE   = 12,   // guide: players near the Encapsulate target must run out
     FELMYST_CORROSION_DISPEL_RANGE     = 40,   // healer/stealer range to the tank to remove Corrosion
     FELMYST_BLAZING_DEAD_PICKUP_RANGE  = 30,   // tank pickup radius for Blazing Dead skeletons
-    FELMYST_POST_BREATH_FREEZE_MS      = 10000 // user: after a breath, stand still 10s (fog lingers)
+    FELMYST_POST_BREATH_FREEZE_MS      = 10000, // user: after a breath, stand still 10s (fog lingers)
+
+    // Flight-phase breath lanes. boss_felmyst.cpp picks a RANDOM lane each strafe
+    // (_currentLane = urand(0,2)) and flies straight along that lane's X from the north
+    // (Y~704) to the south (Y~515) or back, dropping fog (45582 -> charm 45717) along the
+    // WHOLE corridor. Lanes are ~24y apart in X, so the fog (~10y radius, ESTIMATED - DBC not
+    // inspectable locally) cannot cover two lanes at once. A bot pinned to a lane that is NOT
+    // being swept stands still; only the swept lane's occupants move sideways to the farside.
+    FELMYST_LANE_X_TOP                  = 1493, // LeftSideLanes[0] X=1494.7 / RightSideLanes[0] X=1492.8
+    FELMYST_LANE_X_MID                  = 1468, // LeftSideLanes[1] X=1469.9 / RightSideLanes[1] X=1466.7
+    FELMYST_LANE_X_BOT                  = 1443, // LeftSideLanes[2] X=1446.5 / RightSideLanes[2] X=1441.6
+    FELMYST_LANE_TOLERANCE              = 8,    // X distance to the lane centre that still counts as 'on the lane'
 };
+
+// Shared Felmyst flight-lane helpers (defined in SWPTriggers.cpp). Lane index order:
+// 0=top, 1=middle, 2=bottom (matches boss_felmyst.cpp).
+float FelmystLaneX(int lane);
+int FelmystCurrentLane(Player* bot);
+int FelmystSafeLane(Player* bot, int sweptLane);
+bool FelmystLateralEscapePoint(Player* bot, Unit* hazard, float distance, float& outX, float& outY);
 
 /*
  * Eredar Twins: Lady Sacrolash (dark, tanked) / Grand Warlock Alythess (fire, tanked by warlock).
@@ -295,7 +313,9 @@ public:
 // Off-tank taunts when the active tank is Stomped (-50% armor) or reaches 3 Meteor Slash
 // vulnerability stacks - but NEVER while a Meteor Slash cast is in progress: the cone
 // resolves on the current victim, taunting mid-cast flips the cone onto an unpositioned
-// tank who eats ~20000 solo and dies (user: 流星会秒人).
+// tank who eats ~20000 solo and dies (user: 流星会秒人). And only from the boss's BACK
+// (user: tank要注意boss的朝向): the taunter must sit in the rear sector (>= 120 degrees
+// off his facing) so the flip lands on the taunter's own camp, not across the raid.
 class BrutallusTankSwapTrigger : public SunwellEncounterTrigger
 {
 public:
@@ -307,6 +327,8 @@ public:
 // Raid split into two soak camps left/right of Brutallus (user: 队伍分成两个方向分摊).
 // Each non-tank non-healer is anchored to a tank; while that tank holds aggro the bot
 // stands inside the frontal cone to share Meteor Slash, otherwise it waits behind the boss.
+// Off-duty tanks are in too (only the active victim tank is excluded): an off-duty tank
+// idling in front would keep stacking the slash debuff and could never taunt back.
 class BrutallusSoakPositionTrigger : public SunwellEncounterTrigger
 {
 public:
@@ -368,10 +390,9 @@ public:
 };
 
 // Flight phase: Felmyst is airborne and sweeps lanes - the breath (Fog of Corruption, 45717
-// charm on contact = death on removal) covers one third of the field each pass, and the lane
-// is random each breath (urand 0-2). Strategy: for the WHOLE airborne phase every non-tank
-// stays in the safe middle of the half opposite the dragon's current half; return to normal
-// only when it lands. Reacting only at breath time leaves bots walking back into lingering fog.
+// charm on contact = death on removal) covers one THIRD of the field per pass along a single
+// lane (X constant, random each breath, urand 0-2 in boss_felmyst.cpp). Active ONLY when this
+// bot is standing inside the lane being swept; bots on other lanes hold position.
 class FelmystDeepBreathTrigger : public SunwellEncounterTrigger
 {
 public:

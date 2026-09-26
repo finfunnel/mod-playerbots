@@ -331,6 +331,25 @@ bool TwinEmpWrongDamageTypeTrigger::IsActiveInEncounter()
     return target->IsImmunedToDamage(SPELL_SCHOOL_MASK_NORMAL);
 }
 
+bool TwinEmpTooCloseTrigger::IsActiveInEncounter()
+{
+    Creature* veklor = bot->FindNearestCreature(NPC_VEKLOR, TWIN_EMPERORS_SEARCH_RANGE, true);
+    Creature* veknilash = bot->FindNearestCreature(NPC_VEKNILASH, TWIN_EMPERORS_SEARCH_RANGE, true);
+    if (!veklor || !veknilash)
+        return false;
+
+    // This bot must be the current victim of one of the twins: the tank holding aggro
+    // drags; this includes the warlock spell tank on Veklor (not a "tank" by IsTank()
+    // but functionally the one who must move). DPS/healers keep their assignments.
+    Unit* veklorVictim = veklor->GetVictim();
+    Unit* veknilashVictim = veknilash->GetVictim();
+    if (veklorVictim != bot && veknilashVictim != bot)
+        return false;
+
+    // 60yd is the Heal Brother (7393) range: at or below this the twins heal each other
+    return veklor->GetExactDist2d(veknilash) <= static_cast<float>(TWIN_EMPERORS_SEPARATION);
+}
+
 // ---- Ouro ----
 
 bool OuroSubmergedTrigger::IsActiveInEncounter()

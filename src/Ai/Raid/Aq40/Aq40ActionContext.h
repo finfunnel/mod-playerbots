@@ -48,6 +48,7 @@ public:
         creators["twin emp veklor pickup"] = &RaidAq40ActionContext::twin_emp_veklor_pickup;
         creators["twin emp tank swap"] = &RaidAq40ActionContext::twin_emp_tank_swap;
         creators["twin emp attack correct twin"] = &RaidAq40ActionContext::twin_emp_attack_correct_twin;
+        creators["twin emp separate"] = &RaidAq40ActionContext::twin_emp_separate;
 
         // Ouro
         creators["ouro flee mound"] = &RaidAq40ActionContext::ouro_flee_mound;
@@ -85,6 +86,7 @@ private:
     static Action* twin_emp_veklor_pickup(PlayerbotAI* ai) { return new TwinEmpVeklorPickupAction(ai); }
     static Action* twin_emp_tank_swap(PlayerbotAI* ai) { return new TwinEmpTankSwapAction(ai); }
     static Action* twin_emp_attack_correct_twin(PlayerbotAI* ai) { return new TwinEmpAttackCorrectTwinAction(ai); }
+    static Action* twin_emp_separate(PlayerbotAI* ai) { return new TwinEmpSeparateAction(ai); }
     static Action* ouro_flee_mound(PlayerbotAI* ai) { return new OuroFleeMoundAction(ai); }
     static Action* ouro_attack_scarab(PlayerbotAI* ai) { return new OuroAttackScarabAction(ai); }
     static Action* cthun_flee_dark_glare(PlayerbotAI* ai) { return new CthunFleeDarkGlareAction(ai); }

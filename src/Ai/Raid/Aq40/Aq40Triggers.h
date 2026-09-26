@@ -319,6 +319,16 @@ public:
     bool IsActiveInEncounter() override;
 };
 
+// Veklor and Veknilash are within 60yd of each other: they spam Heal Brother (7393) for
+// 30000 every 3.6s - the tanks must drag their assigned twin apart immediately
+// (guide: 保持双子皇帝之间距离).
+class TwinEmpTooCloseTrigger : public AhnQirajEncounterTrigger
+{
+public:
+    TwinEmpTooCloseTrigger(PlayerbotAI* ai) : AhnQirajEncounterTrigger(ai, "twin emp too close", 1) {}
+    bool IsActiveInEncounter() override;
+};
+
 // ---- Ouro ----
 
 // Ouro is submerged (26063 visual, boss despawned/unselectable while dirt mounds 15712

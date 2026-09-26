@@ -53,24 +53,31 @@ void RaidSunwellPlateauStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
 
     // Two-camp slash soaking: non-tank non-healer bots alternate camps by group index,
     // each anchored to a tank; anchored camp soaks in the cone, the other waits behind
-    // the boss. Runs below emergency burn-spreading but above default positioning.
+    // the boss. Off-duty tanks join the rear wait too - only the active tank stays in
+    // the cone. Runs below emergency burn-spreading but above default positioning.
     triggers.push_back(new TriggerNode("brutallus soak position",
             { NextAction("brutallus soak position", ACTION_RAID + 1) }));
 
     // ---- Felmyst <The Broodmother>: ground P1 / flight P2 ----
 
-    // P2 priority model (user-confirmed): poison and breath dodging are TOP, eye-beam kiting
-    // SECOND, and tank skeleton pickup / DPS damage are the DEFAULT rotation in the safe zone.
-    // Attacking the airborne boss is the LOWEST priority (1-hit-locked, not worth GCDs).
+    // P2 priority model (user-confirmed, 稳妥优先DPS可以差不能减员):
+    //   poison/breath escape TOP (EMERGENCY+6/+5), eye-beam kite SECOND (+4, LATERAL east-west
+    //   only - never drag poison through the raid), skeleton kill THIRD (+3, the chased bot is
+    //   naturally excluded because its kite outranks this), then dispels/heals, and only then DPS.
+    //   Everyone dynamic-dodges by lane (user: 看龙在哪一条 lane 就是喷哪边): bots inside the
+    //   lane the dragon is on shift to the farthest other lane; bots elsewhere hold position -
+    //   nobody hard-camps one corner, the fog always lands where the dragon is.
+    //   Attacking the airborne boss is the LOWEST priority (1-hit-locked, not worth GCDs).
 
     // 1. TOP: poison cloud under/near us - escape instantly. The vapor trail is dragged by a
     // chased player and can land on our shelter, so it outranks everything in the flight phase.
     triggers.push_back(new TriggerNode("felmyst vapor trail nearby",
             { NextAction("felmyst vapor trail escape", ACTION_EMERGENCY + 6) }));
 
-    // 1. TOP: whole-flight shelter from the breath - every non-tank moves to the middle of the
-    // half opposite the dragon and holds there (fog lands on any lane and lingers). Same tier as
-    // poison; a charm death is unrecoverable, so it must not be beaten by normal rotation.
+    // 1. TOP: dynamic lane dodge (user: 看龙在哪一条 lane 就是喷哪边). Active ONLY when this bot
+    // stands inside the lane the dragon is currently breathing; it shifts sideways to the
+    // farthest other lane. Bots on other lanes hold. Same tier as poison - a charm death is
+    // unrecoverable, so it must not be beaten by the normal rotation.
     triggers.push_back(new TriggerNode("felmyst deep breath",
             { NextAction("felmyst deep breath avoid", ACTION_EMERGENCY + 5) }));
 
@@ -93,11 +100,14 @@ void RaidSunwellPlateauStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
     triggers.push_back(new TriggerNode("felmyst corrosion",
             { NextAction("felmyst corrosion", ACTION_RAID + 2) }));
 
-    // P2 Blazing Dead skeletons, from the safe half: tanks pick them up and collect the pack;
-    // non-tank DPS thin the ones that are reachable without leaving the safe zone.
+    // P2 Blazing Dead skeletons (user: 出小骷髅, 除了被点名的,其他人优先击杀小骷髅): the
+    // chased-eye-beam bot kites (EMERGENCY+4 above); everyone else except tanks kills the pack
+    // FIRST - above the default rotation and even above Encapsulate spread. Bots never stand in
+    // a lane being swept to engage (the deep-breath check gates both the kill and the tank
+    // pickup); otherwise they fight skeletons wherever they are.
     triggers.push_back(new TriggerNode("felmyst blazing dead nearby",
             { NextAction("felmyst blazing dead pickup", ACTION_RAID + 2),
-              NextAction("felmyst blazing dead attack", ACTION_RAID + 1) }));
+              NextAction("felmyst blazing dead attack", ACTION_EMERGENCY + 3) }));
 
     // A raid ally is mind-controlled (Fog of Corruption): kill them if the charm made them
     // hostile, otherwise stay away. Above normal DPS so we do not stand next to a charmed ally.

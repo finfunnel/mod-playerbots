@@ -135,8 +135,12 @@ void RaidAq40Strategy::InitTriggers(std::vector<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode("twin emp wrong damage type",
             { NextAction("twin emp attack correct twin", ACTION_RAID + 5) }));
 
-    // Twin-brother healing (7393) within 60yd: keep the emperors tanked apart. That is
-    // tank positioning set up at the pull, not a reactive in-fight action - no node.
+    // Twin-brother healing (7393) within 60yd: the tank holding aggro drags their twin
+    // directly away from the other boss until clearly past the heal range
+    // (guide: 保持双子皇帝之间距离)
+    triggers.push_back(new TriggerNode("twin emp too close",
+            { NextAction("twin emp separate", ACTION_RAID + 7) }));
+
     // Hunters keep damage-type discipline via the switch above; heal bolts/blizzard are
     // heal/movement checks handled by default spread.
 

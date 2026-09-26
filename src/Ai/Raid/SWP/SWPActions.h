@@ -95,7 +95,12 @@ public:
 // Two-camp Meteor Slash soaking (user: 队伍分成两个方向分摊). The bot is anchored to a
 // tank (odd/even group index): while the anchor tank is Brutallus' victim the bot moves
 // into the frontal cone to share the ~20000 slash; otherwise it slides behind the boss
-// and waits for its tank's turn. Camp swap follows aggro automatically.
+// and waits for its tank's turn. Camp swap follows aggro automatically. Off-duty tanks
+// wait at the same rear spot with their camp so the 120-degree cone never stacks the
+// fire vulnerability on them (their taunt turn is blocked while the debuff holds).
+// User rules on top: the parked tank HOLDS the tick (tank不要乱动 - no chase moves can
+// drag him around), and the taunt only fires from the boss's back (tank要注意boss的
+// 朝向 - the cone flips with his facing, so it lands on the taunter's own camp).
 class BrutallusSoakPositionAction : public MovementAction
 {
 public:
@@ -147,11 +152,11 @@ public:
     bool Execute(Event event) override;
 };
 
-// Flight-phase shelter: while Felmyst is airborne, every non-tank moves to the MIDDLE of the
-// half opposite the dragon's current half and stays there (the safe zone), so no fresh breath
-// nor lingering fog can touch it. The target is the centre of that half, and each bot spreads
-// by a small X offset so the safe zone is not one stacked pile. Returns false once inside,
-// letting the normal rotation (attacking skeletons from the safe edge) resume.
+// Flight-phase dodge (user: 看龙在哪一条 lane 就是喷哪边): DYNAMIC lane dodge. The dragon
+// breathes the lane it is flying on; this action runs only when THIS bot stands inside that
+// swept lane and shifts it sideways to the farthest non-swept lane. Bots on other lanes hold
+// (their trigger is inactive), and when the dragon is repositioning (no active lane) nobody
+// moves. Once the dragon lands (P1) the trigger deactivates and normal ground-phase play resumes.
 class FelmystDeepBreathAvoidAction : public MovementAction
 {
 public:
@@ -159,8 +164,8 @@ public:
     bool Execute(Event event) override;
 };
 
-// Blazing Dead skeleton (25268): tank picks it up and keeps it off the raid, mirroring
-// MuruVoidSentinelPickupAction.
+// Blazing Dead skeleton (25268): tank picks it up (taunt / melee) and keeps the pack off the
+// raid, mirroring MuruVoidSentinelPickupAction. Works on freshly-summoned skeletons too.
 class FelmystBlazingDeadPickupAction : public AttackAction
 {
 public:
@@ -169,9 +174,12 @@ public:
     bool Execute(Event event) override;
 };
 
-// Non-tank DPS thin the skeleton pack from the safe zone: attack the nearest Blazing Dead
-// that is close enough to engage without leaving the safe half. If it is far into the fog
-// half, leave it to the tank instead.
+// Kill the skeleton pack BEFORE anything else in P2 (user: 出小骷髅, 除了被点名的,其他人优先
+// 击杀小骷髅). Every non-tank (melee + ranged) engages the nearest Blazing Dead; the
+// eye-beam-chased bot keeps kiting at a higher priority and therefore does not stop to fight.
+// Nobody fights while standing inside the lane being swept (the deep-breath check gates this),
+// otherwise skeletons are burned from anywhere - ranged hit far ones, melee only what is
+// already in reach. Fresh skeletons (not yet in combat) are burned too.
 class FelmystBlazingDeadAttackAction : public AttackAction
 {
 public:

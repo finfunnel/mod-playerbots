@@ -46,6 +46,7 @@ public:
         creators["twin emp veklor untanked"] = &RaidAq40TriggerContext::twin_emp_veklor_untanked;
         creators["twin emp tank swap"] = &RaidAq40TriggerContext::twin_emp_tank_swap;
         creators["twin emp wrong damage type"] = &RaidAq40TriggerContext::twin_emp_wrong_damage_type;
+        creators["twin emp too close"] = &RaidAq40TriggerContext::twin_emp_too_close;
 
         // Ouro
         creators["ouro submerged"] = &RaidAq40TriggerContext::ouro_submerged;
@@ -80,6 +81,7 @@ private:
     static Trigger* twin_emp_veklor_untanked(PlayerbotAI* ai) { return new TwinEmpVeklorUntankedTrigger(ai); }
     static Trigger* twin_emp_tank_swap(PlayerbotAI* ai) { return new TwinEmpTankSwapTrigger(ai); }
     static Trigger* twin_emp_wrong_damage_type(PlayerbotAI* ai) { return new TwinEmpWrongDamageTypeTrigger(ai); }
+    static Trigger* twin_emp_too_close(PlayerbotAI* ai) { return new TwinEmpTooCloseTrigger(ai); }
     static Trigger* ouro_submerged(PlayerbotAI* ai) { return new OuroSubmergedTrigger(ai); }
     static Trigger* ouro_scarabs_up(PlayerbotAI* ai) { return new OuroScarabsUpTrigger(ai); }
     static Trigger* cthun_dark_glare(PlayerbotAI* ai) { return new CthunDarkGlareTrigger(ai); }
